@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from europeya_matrix_redactor.clients.matrix_client import MatrixClient, MatrixRequestError
 from europeya_matrix_redactor.dto import CandidateEvent, RedactionResult, SenderScopeStatus
@@ -22,9 +22,14 @@ class RedactionExecutor:
         self,
         candidates: Iterable[CandidateEvent],
         sender_scope_map: dict[str, SenderScopeStatus],
+        room_membership_failures: Mapping[str, str] | None = None,
     ) -> list[RedactionResult]:
         return [
-            self.execute_candidate(candidate, sender_scope_map.get(candidate.sender))
+            self.execute_candidate(
+                candidate,
+                sender_scope_map.get(candidate.sender),
+                None if room_membership_failures is None else room_membership_failures.get(candidate.event_id),
+            )
             for candidate in candidates
         ]
 
@@ -32,6 +37,7 @@ class RedactionExecutor:
         self,
         candidate: CandidateEvent,
         sender_scope_status: SenderScopeStatus | None,
+        room_membership_failure_reason: str | None = None,
     ) -> RedactionResult:
         if sender_scope_status is None or not sender_scope_status.can_redact:
             reason = (
@@ -45,7 +51,19 @@ class RedactionExecutor:
                 sender=candidate.sender,
                 success=False,
                 retryable=False,
+                failure_kind="sender_scope",
                 error_message=f"sender scope failed: {reason}",
+            )
+
+        if room_membership_failure_reason is not None:
+            return RedactionResult(
+                event_id=candidate.event_id,
+                room_id=candidate.room_id,
+                sender=candidate.sender,
+                success=False,
+                retryable=False,
+                failure_kind="room_membership",
+                error_message=f"room membership failed: {room_membership_failure_reason}",
             )
 
         requested = False
@@ -72,6 +90,7 @@ class RedactionExecutor:
                 sender=candidate.sender,
                 success=False,
                 retryable=exc.retryable,
+                failure_kind="redaction_request",
                 http_status=exc.http_status,
                 error_message=str(exc),
             )

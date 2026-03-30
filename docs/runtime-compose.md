@@ -2,102 +2,85 @@
 
 ## 1. Базовый принцип
 
-Приложение должно запускаться внутри Docker-контейнера и управляться через `docker-compose`.
+Приложение запускается внутри Docker-контейнера и управляется через `docker-compose`.
 
 Рекомендуемая схема:
 
 - один image;
-- один основной сервис scheduler;
-- один дополнительный manual run path для `run-once`;
-- один volume для локального состояния приложения;
-- read-only mount каталога с SQLite БД `Synapse`.
+- один long-running scheduler service;
+- one-shot path через `docker compose run --rm`;
+- отдельный writable volume под локальное состояние;
+- read-only mount каталога данных `Synapse`.
 
 ## 2. Почему scheduler внутри контейнера
 
-Пользовательское требование прямо просит запуск “внутри docker контейнера через docker-compose раз в сутки”.
+Так проще сохранить переносимость runtime:
 
-Наиболее прагматичная модель:
+- нет привязки к host cron;
+- один и тот же image обслуживает и плановые, и ручные запуски;
+- compose остаётся единой точкой управления.
 
-- внутри контейнера работает `supercronic`;
-- он по cron запускает Python CLI-команду `run-once`;
-- та же команда используется вручную для dry-run и аварийных запусков.
-
-Плюсы:
-
-- нет зависимости от host cron;
-- одинаковый код для планового и ручного запуска;
-- проще эксплуатация и перенос между серверами.
-
-## 3. Рекомендуемая структура compose
+## 3. Generic compose-структура
 
 ### Service `matrix-redactor`
 
-Назначение:
+Отвечает за:
 
-- long-running scheduler container.
+- рендер `crontab`;
+- запуск `supercronic`;
+- вызов `run-once` по расписанию;
+- healthcheck.
 
-Ответственность:
+### Manual path
 
-- ждать нужное время;
-- запускать one-shot команду;
-- отдавать stdout/stderr в Docker logs.
+Используется для:
 
-### Manual execution path
-
-Нужен для:
-
-- dry-run;
-- smoke test;
-- ручного аварийного запуска после исправления прав доступа.
-
-Это может быть:
-
-- отдельный compose profile;
-- или `docker compose run --rm matrix-redactor ...`.
+- `dry-run-report`
+- `run-once --dry-run`
+- `run-once --real-run`
+- `healthcheck`
 
 ## 4. Что должно быть смонтировано
 
 ### Для SQLite
 
-Нужно монтировать не только файл, а весь каталог:
-
 ```yaml
 volumes:
-  - /srv/matrix/synapse:/opt/synapse:ro
+  - ${SYNAPSE_DATA_DIR:-./synapse-data}:/opt/synapse:ro
   - ./var:/app/var
 ```
 
 Причина:
 
-- у SQLite могут существовать `homeserver.db-wal` и `homeserver.db-shm`;
-- mount только одного файла может дать несогласованное чтение.
+- SQLite может использовать sidecar-файлы;
+- каталожный mount безопаснее, чем mount одного файла.
 
-### Для будущего PostgreSQL
+### Для PostgreSQL
 
-Каталог БД больше не нужен.
+Каталог с SQLite не нужен.
 
-Останется только:
+Достаточно:
 
-- сетевой доступ к PostgreSQL;
-- `SYNAPSE_DB_URL` в `.env`;
-- volume под локальное состояние приложения.
+- сетевого доступа к PostgreSQL;
+- корректного `SYNAPSE_DB_URL`;
+- writable volume под `./var`.
 
 ## 5. Рекомендуемый compose-фрагмент
-
-Это проектная спецификация, а не финальный боевой файл:
 
 ```yaml
 services:
   matrix-redactor:
     build: .
-    container_name: matrix-redactor
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      - /srv/matrix/synapse:/opt/synapse:ro
+      - ${SYNAPSE_DATA_DIR:-./synapse-data}:/opt/synapse:ro
       - ./var:/app/var
-    command: ["supercronic", "/app/crontab"]
+    command:
+      - /bin/sh
+      - -lc
+      - python -m europeya_matrix_redactor.cli render-crontab --output /app/var/crontab && exec supercronic /app/var/crontab
     healthcheck:
       test: ["CMD", "python", "-m", "europeya_matrix_redactor.cli", "healthcheck"]
       interval: 60s
@@ -105,21 +88,17 @@ services:
       retries: 3
 ```
 
-## 6. Что должно быть в образе
+## 6. Loopback-only Synapse
 
-В будущем `Dockerfile` должен содержать:
+Если `Synapse` слушает только `127.0.0.1` на host-машине, для контейнера может понадобиться отдельная сетевая схема, например:
 
-- Python runtime;
-- зависимости проекта;
-- `supercronic`;
-- CLI entrypoint;
-- каталог `/app/var` под state DB и lock file.
+- `network_mode: host`;
+- или publish/reverse-proxy path;
+- или bridge-сеть с доступным адресом `Synapse`.
 
-Рекомендуемая база:
+Это зависит от окружения и не является частью бизнес-логики приложения.
 
-- `python:3.13-slim`
-
-## 7. Команды эксплуатации, которые должны поддерживаться
+## 7. Команды, которые должен поддерживать runtime
 
 ### Build
 
@@ -127,13 +106,13 @@ services:
 docker compose build
 ```
 
-### Плановый запуск через scheduler
+### Плановый запуск
 
 ```bash
 docker compose up -d
 ```
 
-### Dry-run вручную
+### Dry-run
 
 ```bash
 docker compose run --rm \
@@ -142,7 +121,7 @@ docker compose run --rm \
   python -m europeya_matrix_redactor.cli run-once
 ```
 
-### Реальный one-shot запуск
+### Real-run
 
 ```bash
 docker compose run --rm \
@@ -151,61 +130,28 @@ docker compose run --rm \
   python -m europeya_matrix_redactor.cli run-once
 ```
 
-### Просмотр логов
+### Healthcheck
 
 ```bash
-docker compose logs -f matrix-redactor
+docker compose run --rm \
+  matrix-redactor \
+  python -m europeya_matrix_redactor.cli healthcheck
 ```
 
-## 8. Таймзона
+## 8. Volume под локальное состояние
 
-Для scheduler надо явно фиксировать timezone.
+`./var:/app/var` должен содержать:
 
-Рекомендуемый вариант:
-
-- `TZ=Europe/Moscow`
-
-Это важно, чтобы `05:00` в конфиге всегда соответствовал ожидаемому локальному времени сервера/команды.
+- локальную `state.db`;
+- lock file;
+- временные runtime-артефакты вроде сгенерированного `crontab`.
 
 ## 9. Поведение scheduler
 
-Scheduler не должен содержать отдельную бизнес-логику.
+Scheduler не содержит отдельной бизнес-логики.
 
 Его задача:
 
-- по cron вызывать `run-once`;
-- завершать дочерний процесс;
-- писать его stdout/stderr в общий log stream.
-
-Вся логика redaction должна жить только в Python CLI.
-
-## 10. Volume под состояние приложения
-
-Нужен отдельный writable volume:
-
-- `./var:/app/var`
-
-Там должны храниться:
-
-- `state.db` или аналогичный локальный журнал;
-- lock file;
-- при необходимости JSON-отчёты dry-run.
-
-## 11. Обязательные эксплуатационные проверки
-
-После первого запуска будущего контейнера надо уметь проверить:
-
-- контейнер поднялся;
-- scheduler действительно ждёт и не падает в restart loop;
-- `healthcheck` проходит;
-- `run-once --dry-run` видит боевую БД;
-- при реальном запуске redaction доходят до `Synapse`.
-
-## 12. Отдельная оговорка про суточное расписание
-
-Если `.env` содержит cron на `05:00` один раз в сутки, это означает:
-
-- sweep выполняется один раз в день;
-- точность фактического TTL не 24 часа, а “на ближайшем ежедневном запуске после достижения 24 часов”.
-
-Это не баг и не пограничный случай, а фундаментальное свойство такого расписания.
+- по cron запускать `run-once`;
+- писать stdout/stderr в контейнерные логи;
+- завершать дочерний процесс после выполнения.

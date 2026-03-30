@@ -3,14 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, func, insert, or_, outerjoin, select, update
+from sqlalchemy import and_, func, insert, or_, outerjoin, select, tuple_, update
 from sqlalchemy.engine import Engine
 
 from europeya_matrix_redactor.db.app_state_schema import run_failures, runs
 from europeya_matrix_redactor.db.synapse_schema import (
     access_tokens,
+    current_state_events,
     events,
     redactions,
+    room_memberships,
     user_ips,
     users,
 )
@@ -210,6 +212,40 @@ class SynapseEventRepository:
             tokens_by_user.setdefault(user_id, []).append(token)
         return tokens_by_user
 
+    def get_joined_room_memberships(
+        self,
+        sender_room_pairs: Iterable[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        normalized_pairs = tuple(sorted(set(sender_room_pairs)))
+        if not normalized_pairs:
+            return set()
+
+        membership_join = current_state_events.join(
+            room_memberships,
+            room_memberships.c.event_id == current_state_events.c.event_id,
+        )
+        query = (
+            select(
+                current_state_events.c.state_key.label("user_id"),
+                current_state_events.c.room_id,
+            )
+            .select_from(membership_join)
+            .where(current_state_events.c.type == "m.room.member")
+            .where(room_memberships.c.membership == "join")
+            .where(
+                tuple_(
+                    current_state_events.c.state_key,
+                    current_state_events.c.room_id,
+                ).in_(normalized_pairs),
+            )
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(query).mappings().all()
+        return {
+            (str(row["user_id"]), str(row["room_id"]))
+            for row in rows
+        }
+
     @staticmethod
     def _row_to_candidate(row) -> CandidateEvent:
         return CandidateEvent(
@@ -300,7 +336,7 @@ class RunJournalRepository:
             return
         self.record_failure(
             run_id=run_id,
-            failure_kind="redaction_request",
+            failure_kind=result.failure_kind or "redaction_request",
             event_id=result.event_id,
             room_id=result.room_id,
             retryable=result.retryable,

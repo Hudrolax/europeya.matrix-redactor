@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - /srv/matrix/synapse:/opt/synapse:ro
+      - ${SYNAPSE_DATA_DIR:-./synapse-data}:/opt/synapse:ro
       - ./var:/app/var
     command:
       - /bin/sh

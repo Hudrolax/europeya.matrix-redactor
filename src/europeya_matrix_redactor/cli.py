@@ -267,20 +267,33 @@ def _execute_locked_run(
                 batch_size=config.batch_size,
             ):
                 processed_count += len(batch)
-                for result in executor.execute_batch(batch, sender_scope_map):
+                membership_checked_candidates = [
+                    candidate
+                    for candidate in batch
+                    if (sender_status := sender_scope_map.get(candidate.sender)) is not None
+                    and sender_status.can_redact
+                ]
+                room_membership_failures = planner.sender_scope_verifier.find_room_membership_failures(
+                    membership_checked_candidates,
+                )
+
+                for result in executor.execute_batch(
+                    batch,
+                    sender_scope_map,
+                    room_membership_failures,
+                ):
                     if result.success:
                         success_count += 1
                         continue
 
-                    sender_status = sender_scope_map.get(result.sender)
-                    if sender_status is not None and not sender_status.can_redact:
+                    if result.failure_kind in {"sender_scope", "room_membership"}:
                         skipped_count += 1
                         journal.record_failure(
                             run_id,
-                            failure_kind="sender_scope",
+                            failure_kind=result.failure_kind or "skipped",
                             room_id=result.room_id,
                             event_id=result.event_id,
-                            error_message=sender_status.failure_reason or "sender scope denied",
+                            error_message=result.error_message or "candidate skipped",
                         )
                         continue
 
@@ -335,6 +348,7 @@ def _execute_locked_run(
         )
         logger.exception("run failed", extra={"run_id": run_id})
         raise
+
 
 def run_healthcheck(config: AppConfig) -> int:
     synapse_engine = build_synapse_engine(config.synapse_db_url)

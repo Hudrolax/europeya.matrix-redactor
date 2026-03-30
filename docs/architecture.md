@@ -1,280 +1,174 @@
 # Архитектура
 
-## 1. Требование, которое фиксирует архитектуру
+## 1. Базовое требование
 
-Целевое поведение:
+Сообщение должно исчезать у клиентов через штатный Matrix-механизм, а не через прямое изменение `Synapse DB`.
 
-- сообщение старше `24h` должно исчезать у клиентов;
-- это должно работать не только в локальных комнатах, но и в federated rooms;
-- приложение должно принимать решение по read-only данным из БД `Synapse`;
-- удаление должно выполняться штатным Matrix-механизмом.
+Из этого следуют два правила:
 
-Из этого следует главный выбор:
+- `Synapse DB` используется только для поиска и preflight-проверок;
+- фактическое удаление выполняется через `PUT /_matrix/client/v3/rooms/{roomId}/redact/{eventId}/{txnId}`.
 
-- БД используется только для поиска кандидатов;
-- реальное удаление делается через `m.room.redaction`.
+## 2. Выбранная модель исполнения
 
-## 2. Выбранная архитектурная стратегия
+Текущая реализация использует режим `local_user_access_token`.
 
-### Chosen path
+Кандидат может быть redaction'ен только если одновременно выполняются все условия:
 
-- `Synapse DB` используется как источник правды для отбора событий.
-- Приложение не пишет в `Synapse DB`.
-- Для каждого найденного `event_id` создаётся redaction через Matrix Client API.
-- Для строгого federated-режима приложение работает от имени сервисного Matrix-пользователя.
+- отправитель является локальным пользователем данного homeserver;
+- пользователь не деактивирован;
+- в `Synapse DB` есть хотя бы один валидный access token пользователя;
+- пользователь всё ещё состоит в комнате на момент выполнения;
+- событие ещё не было redaction'ено ранее.
 
-### Почему не direct DB delete
+Если хотя бы одно условие не выполнено, событие пропускается без HTTP-запроса.
 
-- `Synapse` хранит room graph, state, auth chain и производные структуры;
-- прямое удаление строк из `events` и связанных таблиц не является штатной операцией;
-- это не создаёт federated redaction event и не гарантирует корректный клиентский результат.
+## 3. Почему не direct DB delete
 
-### Почему не `retention` как основной вариант
+- прямое удаление строк не создаёт Matrix redaction event;
+- это риск для целостности room graph и производных таблиц `Synapse`;
+- такой подход не является штатным способом lifecycle-управления событиями.
 
-- `retention` хорош как room/server TTL-политика;
-- но для данного проекта нужен детерминированный механизм с точным списком `event_id`;
-- явный redaction лучше подходит для последующего аудита, dry-run и поштучной обработки ошибок.
+## 4. Ограничения модели
 
-## 3. Компоненты будущего приложения
+В репозитории зафиксирована только одна актуальная архитектура: redaction от имени автора события, если для него доступны условия выполнения.
+
+Из этого следуют два ограничения:
+
+- remote/federated отправители не поддерживаются;
+- локальные пользователи, уже покинувшие комнату, не могут redaction'ить свои старые события.
+
+## 5. Компоненты приложения
 
 ### Scheduler
 
-Отвечает только за запуск `run-once` по cron-подобному расписанию.
-
-Рекомендуемая реализация:
-
-- отдельный процесс внутри контейнера на базе `supercronic`;
-- тот же image, что и у приложения;
-- тот же one-shot command, что и для ручного запуска.
+Запускает `run-once` по cron-подобному расписанию внутри контейнера.
 
 ### Config Loader
 
-Читает `.env` и валидирует:
-
-- URL `Synapse`;
-- DSN `Synapse` БД;
-- токен сервисного пользователя;
-- TTL;
-- cron schedule;
-- batch size;
-- allowlist типов событий;
-- dry-run флаг.
+Читает `.env`, валидирует TTL, cron, allowlist, DSN и параметры HTTP-клиента.
 
 ### Database Reader
 
-Read-only слой на SQLAlchemy Core.
+Read-only слой на SQLAlchemy Core для:
 
-Задачи:
+- выборки событий-кандидатов;
+- проверки sender scope;
+- проверки текущего membership пользователя в комнате.
 
-- выбрать события старше порога;
-- исключить state events;
-- исключить уже redacted events;
-- при необходимости фильтровать комнаты или типы событий;
-- уметь одинаково работать с SQLite и PostgreSQL.
+### Sender Scope Verifier
 
-### Candidate Planner
+Определяет для каждого отправителя:
 
-Формирует план запуска:
+- локальный он или нет;
+- активен ли он;
+- есть ли у него валидный access token.
 
-- какие события должны быть обработаны в этой итерации;
-- какими батчами;
-- какие комнаты проблемные уже на этапе preflight;
-- сколько redaction-запросов ожидается.
+### Room Membership Verifier
 
-### Room Access Verifier
-
-Проверяет, сможет ли исполнитель реально сделать redaction:
-
-- сервисный пользователь состоит в комнате;
-- у него есть право `redact` чужие события;
-- комната не находится в известном unsupported-состоянии.
-
-Проверка может быть сделана:
-
-- либо из DB/room state;
-- либо через Matrix API;
-- либо комбинированно.
+Проверяет для каждого кандидата, что текущий membership пользователя в комнате равен `join`.
 
 ### Redaction Executor
 
-Для каждого `event_id` вызывает:
+Для каждого допустимого `event_id`:
 
-- `PUT /_matrix/client/v3/rooms/{roomId}/redact/{eventId}/{txnId}`
-
-Особенности:
-
-- создаёт уникальный `txnId`;
-- выдерживает rate limit и временные сбои;
-- разделяет permanent failure и retryable failure;
-- не redaction'ит событие второй раз, если оно уже попало в `redactions`.
+- берёт лучший доступный token пользователя;
+- делает redaction через Matrix Client API;
+- разделяет permanent и retryable ошибки.
 
 ### Run Journal
 
-Отдельное локальное хранилище приложения, не связанное с `Synapse DB`.
+Хранит локальную информацию о dry-run, real-run, skipped и failed событиях в отдельной БД приложения.
 
-Содержит:
-
-- старт/окончание запуска;
-- effective cutoff;
-- количество найденных кандидатов;
-- количество успешных redaction;
-- список ошибок;
-- метки dry-run/real-run.
-
-Рекомендуемый формат:
-
-- локальная SQLite БД приложения или `JSONL` + structured logs.
-
-## 4. Поток выполнения
+## 6. Поток выполнения
 
 ```mermaid
 flowchart TD
-    A["Scheduler"] --> B["Load .env and validate config"]
+    A["Scheduler or manual CLI"] --> B["Load .env and validate config"]
     B --> C["Open read-only Synapse DB connection"]
     C --> D["Calculate cutoff = now - TTL"]
     D --> E["Read candidate events in batches"]
-    E --> F["Skip already-redacted events"]
-    F --> G["Verify room access for service user"]
-    G --> H["Send Matrix redactions"]
+    E --> F["Verify sender scope"]
+    F --> G["Verify sender still joined in room"]
+    G --> H["Send Matrix redactions with sender token"]
     H --> I["Persist run summary and failures"]
     I --> J["Exit"]
 ```
 
-## 5. Последовательность одного запуска
+## 7. Последовательность одного batch
 
 ```mermaid
 sequenceDiagram
-    participant S as Scheduler
     participant A as App
     participant D as Synapse DB
-    participant M as Synapse Client API
+    participant M as Matrix Client API
     participant J as Run Journal
 
-    S->>A: start run-once
-    A->>D: read candidates older than 24h
-    D-->>A: batch of event_id + room_id + sender + ts + type
-    A->>D: check redactions and room metadata
-    D-->>A: filtered batch
-    loop for each candidate
+    A->>D: read candidate events older than TTL
+    D-->>A: event_id + room_id + sender + ts + type
+    A->>D: verify sender is local, active, has token
+    D-->>A: sender scope snapshot
+    A->>D: verify sender current membership is join
+    D-->>A: room membership snapshot
+    loop for each eligible candidate
         A->>M: PUT /rooms/{roomId}/redact/{eventId}/{txnId}
         M-->>A: success or error
     end
-    A->>J: persist summary and failed events
-    A-->>S: exit code
+    A->>J: persist summary and failed/skipped events
 ```
 
-## 6. Правило отбора событий
+## 8. Правило отбора событий
 
 Базовый набор кандидатов:
 
 - `origin_server_ts < cutoff_ms`
-- `outlier = 0`
+- `outlier = false`
 - `rejection_reason IS NULL`
 - `state_key IS NULL`
 - `type IN EVENT_TYPE_ALLOWLIST`
 - нет записи в `redactions`, где `redactions.redacts = events.event_id`
 
-Рекомендуемый allowlist по умолчанию:
+Allowlist по умолчанию:
 
 - `m.room.encrypted`
 - `m.room.message`
 - `m.reaction`
 
-Почему allowlist, а не “все non-state события”:
+## 9. Правило допуска к redaction
 
-- это снижает риск случайно redaction'ить служебные event type;
-- на текущем сервере почти все пользовательские сообщения уже укладываются в этот набор;
-- позднее можно добавить `m.sticker`, `m.poll.start`, `m.poll.response` и другие типы через конфиг, а не через переписывание кода.
+Даже если событие прошло базовую SQL-выборку, оно не должно уходить в HTTP, если:
 
-## 7. Бэтчинг и производительность
+- отправитель remote/federated;
+- пользователь деактивирован;
+- у пользователя нет валидного access token;
+- пользователь уже не состоит в комнате.
 
-Фактические наблюдения на сервере `45.134.27.106`:
+Последний пункт особенно важен: текущая membership-проверка должна отсеивать такие события заранее, чтобы не ловить предсказуемый `403 M_FORBIDDEN`.
 
-- на таблице `events` есть индекс `events_ts` по `origin_server_ts`;
-- на таблице `redactions` есть индекс `redactions_redacts`;
-- запрос вида “старше cutoff и ещё не redacted” использует оба индекса;
-- на момент исследования кандидатов было `32480`.
-
-Из этого следует:
-
-- нельзя грузить все события в память одним списком;
-- проход должен идти батчами;
-- рекомендуется сортировать по `origin_server_ts ASC`, чтобы идти от самых старых событий;
-- для первого релиза разумный `BATCH_SIZE`: `200` или `500`.
-
-Отдельная rollout-оговорка:
-
-- первый запуск на уже существующей истории может обрабатывать крупный backlog;
-- backlog run и обычный ежедневный run надо воспринимать как разные по нагрузке режимы;
-- при первичном включении полезно иметь отдельный dry-run summary и, при необходимости, временно более консервативный batch size.
-
-## 8. Идемпотентность
-
-Приложение должно быть безопасно при повторном запуске.
-
-Основные механизмы:
+## 10. Идемпотентность
 
 - события, уже присутствующие в `redactions.redacts`, повторно не планируются;
-- каждый run фиксирует свой `run_id`;
-- один и тот же запуск не должен идти параллельно с другим;
-- dry-run и real-run имеют одинаковый планировщик, но разный исполнитель.
+- scheduler защищён lock file и локальным run journal;
+- dry-run и real-run используют один и тот же planner;
+- повторный запуск должен быть безопасен.
 
-## 9. Защита от overlap
-
-Даже если scheduler настроен на один запуск в сутки, overlap надо запретить.
-
-Рекомендуемый механизм:
-
-- lock file в `APP_STATE_DIR`;
-- плюс запись `run_status=running` в локальном state store.
-
-Если lock уже занят:
-
-- второй запуск завершается без redaction;
-- это фиксируется в логе как skipped run.
-
-## 10. Ошибки и повторные попытки
-
-Ошибки надо разделять как минимум на две группы.
+## 11. Ошибки
 
 ### Retryable
 
-- временная недоступность `Synapse`;
-- `5xx`;
-- timeout;
-- сетевые сбои;
-- rate limiting.
+- `429`
+- `5xx`
+- timeout
+- транспортные сбои
 
 ### Permanent
 
-- пользователь не состоит в комнате;
-- недостаточный `power level`;
-- событие уже redacted к моменту запроса;
-- комната недоступна сервисному пользователю.
+- remote sender
+- deactivated local user
+- отсутствие токена
+- пользователь не состоит в комнате
+- любой неретраимый `4xx`
 
-Поведение:
+## 12. Следствие архитектуры
 
-- retryable ошибки попадают в retry policy текущего запуска;
-- permanent ошибки пишутся в итоговый отчёт и не ретраятся бесконечно.
-
-## 11. Безопасность
-
-- подключение к `Synapse DB` только read-only;
-- SQLite-путь монтируется в контейнер как `:ro`;
-- токен сервисного пользователя хранится в `.env` или secret file, не в коде;
-- приложение не должно логировать полный access token;
-- причина redaction должна быть нейтральной и предсказуемой, например `Expired by policy`.
-
-## 12. Архитектурный итог
-
-Будущее приложение строится вокруг трёх чётко разделённых слоёв:
-
-- read-only выборка кандидатов из `Synapse DB`;
-- проверка доступа и планирование батчей;
-- redaction через Matrix API.
-
-Это даёт:
-
-- переносимость между SQLite и PostgreSQL;
-- предсказуемый клиентский эффект;
-- возможность dry-run, аудита и безопасной эксплуатации.
+Проект не пытается “пробить” ограничения Matrix через админские обходы. Он либо выполняет redaction в допустимом контексте пользователя, либо явно пропускает событие и пишет причину в run journal.

@@ -2,13 +2,14 @@
 
 ## 1. Общий подход
 
-Весь runtime-конфиг должен приходить через `.env`.
+Runtime-конфиг приходит через `.env`.
 
-Причины:
+Конфигурация разделяется на четыре группы:
 
-- это удобно для `docker-compose`;
-- конфиг легко менять без пересборки image;
-- один и тот же код может одинаково работать в SQLite и PostgreSQL режимах.
+- подключение к `Synapse`;
+- расписание и TTL;
+- параметры HTTP-вызовов;
+- локальное состояние приложения.
 
 ## 2. Обязательные переменные
 
@@ -22,7 +23,7 @@ SYNAPSE_BASE_URL=http://127.0.0.1:8008
 
 Назначение:
 
-- базовый URL для Matrix Client API.
+- базовый URL Matrix Client API.
 
 ### `SYNAPSE_DB_URL`
 
@@ -40,30 +41,6 @@ SYNAPSE_DB_URL=postgresql+psycopg://synapse_ro:password@postgres:5432/synapse
 
 - read-only подключение к базе `Synapse`.
 
-### `MATRIX_SERVICE_USER_ID`
-
-Пример:
-
-```env
-MATRIX_SERVICE_USER_ID=@redactor:matrix.e1capital.ru
-```
-
-Назначение:
-
-- MXID сервисного пользователя, от имени которого идут redaction events в strict mode.
-
-### `MATRIX_ACCESS_TOKEN`
-
-Пример:
-
-```env
-MATRIX_ACCESS_TOKEN=<secret>
-```
-
-Назначение:
-
-- access token сервисного пользователя.
-
 ### `TTL_HOURS`
 
 Пример:
@@ -74,39 +51,40 @@ TTL_HOURS=24
 
 Назначение:
 
-- возраст события, после которого оно попадает под удаление.
+- возраст события, после которого оно попадает под redaction.
 
-## 3. Переменные расписания
+## 3. Расписание
 
 ### `CRON_SCHEDULE`
 
 Пример:
 
 ```env
-CRON_SCHEDULE=0 5 * * *
+CRON_SCHEDULE=0 * * * *
 ```
 
 Назначение:
 
-- расписание запуска встроенного scheduler-процесса внутри контейнера.
+- расписание запуска встроенного scheduler-процесса.
 
-Оговорка:
+Примечание:
 
-- при таком расписании это именно daily sweep, а не точное удаление через 24 часа.
+- частый запуск даёт более близкое к TTL поведение;
+- запуск раз в сутки даёт только daily sweep.
 
 ### `TZ`
 
 Пример:
 
 ```env
-TZ=Europe/Moscow
+TZ=UTC
 ```
 
 Назначение:
 
-- таймзона для scheduler и логов.
+- timezone для scheduler и логов.
 
-## 4. Переменные безопасности и режимов
+## 4. Режимы и поведение
 
 ### `DRY_RUN`
 
@@ -118,11 +96,11 @@ DRY_RUN=true
 
 Назначение:
 
-- если `true`, приложение только считает и логирует кандидатов, но не отправляет redaction.
+- если `true`, приложение считает и логирует кандидатов, но не отправляет redaction.
 
 ### `REDACTION_REASON`
 
-Рекомендуемый пример:
+Пример:
 
 ```env
 REDACTION_REASON=Expired by policy
@@ -130,24 +108,9 @@ REDACTION_REASON=Expired by policy
 
 Назначение:
 
-- текст, который будет записываться в redaction event.
+- текст причины, отправляемый в redaction event.
 
-Примечание:
-
-- имя переменной лучше использовать как `REDACTION_REASON`, а не смешанный вариант. В коде следует поддерживать только одно каноническое имя.
-
-### `ROOM_ACCESS_MODE`
-
-Рекомендуемые значения:
-
-- `strict_bot`
-- `local_admin_fallback`
-
-Назначение:
-
-- явный выбор режима работы исполнителя.
-
-## 5. Переменные производительности
+## 5. Производительность и retry policy
 
 ### `BATCH_SIZE`
 
@@ -157,10 +120,6 @@ REDACTION_REASON=Expired by policy
 BATCH_SIZE=200
 ```
 
-Назначение:
-
-- размер одной DB-выборки и одной порции выполнения.
-
 ### `REQUEST_TIMEOUT_SECONDS`
 
 Пример:
@@ -169,10 +128,6 @@ BATCH_SIZE=200
 REQUEST_TIMEOUT_SECONDS=15
 ```
 
-Назначение:
-
-- timeout на один HTTP-запрос к `Synapse`.
-
 ### `MAX_RETRIES`
 
 Пример:
@@ -180,10 +135,6 @@ REQUEST_TIMEOUT_SECONDS=15
 ```env
 MAX_RETRIES=3
 ```
-
-Назначение:
-
-- количество повторных попыток для retryable ошибок.
 
 ### `RATE_LIMIT_SLEEP_MS`
 
@@ -195,9 +146,10 @@ RATE_LIMIT_SLEEP_MS=200
 
 Назначение:
 
-- искусственное замедление между redaction requests, если понадобится бережный режим.
+- дополнительная искусственная пауза между запросами;
+- не заменяет встроенную обработку `429`.
 
-## 6. Переменные логирования и состояния
+## 6. Логирование и локальное состояние
 
 ### `LOG_LEVEL`
 
@@ -215,10 +167,6 @@ LOG_LEVEL=INFO
 APP_STATE_DB_URL=sqlite+pysqlite:////app/var/state.db
 ```
 
-Назначение:
-
-- локальная БД приложения для журналов запусков и ошибок.
-
 ### `LOCK_FILE_PATH`
 
 Пример:
@@ -227,11 +175,7 @@ APP_STATE_DB_URL=sqlite+pysqlite:////app/var/state.db
 LOCK_FILE_PATH=/app/var/run.lock
 ```
 
-Назначение:
-
-- защита от overlap.
-
-## 7. Переменные отбора событий
+## 7. Отбор событий
 
 ### `EVENT_TYPE_ALLOWLIST`
 
@@ -243,25 +187,34 @@ EVENT_TYPE_ALLOWLIST=m.room.encrypted,m.room.message,m.reaction
 
 Назначение:
 
-- определяет, какие типы событий считаются “сообщениями” для redaction.
+- определяет набор event type, которые считаются пользовательскими сообщениями для redaction.
 
-Почему нужна именно allowlist:
+## 8. Дополнительная переменная compose
 
-- это безопаснее, чем безусловный redaction всех non-state events.
+### `SYNAPSE_DATA_DIR`
 
-## 8. Рекомендуемый `.env.example`
+Пример:
 
 ```env
+SYNAPSE_DATA_DIR=./synapse-data
+```
+
+Назначение:
+
+- путь к каталогу данных `Synapse` для `docker-compose` mount;
+- приложением напрямую не читается и может безопасно игнорироваться кодом.
+
+## 9. Актуальный `.env.example`
+
+```env
+SYNAPSE_DATA_DIR=./synapse-data
 SYNAPSE_BASE_URL=http://127.0.0.1:8008
 SYNAPSE_DB_URL=sqlite+pysqlite:////opt/synapse/homeserver.db
-MATRIX_SERVICE_USER_ID=@redactor:matrix.e1capital.ru
-MATRIX_ACCESS_TOKEN=<secret>
 TTL_HOURS=24
-CRON_SCHEDULE=0 5 * * *
-TZ=Europe/Moscow
+CRON_SCHEDULE=0 * * * *
+TZ=UTC
 DRY_RUN=true
 REDACTION_REASON=Expired by policy
-ROOM_ACCESS_MODE=strict_bot
 BATCH_SIZE=200
 REQUEST_TIMEOUT_SECONDS=15
 MAX_RETRIES=3
@@ -272,14 +225,21 @@ LOCK_FILE_PATH=/app/var/run.lock
 EVENT_TYPE_ALLOWLIST=m.room.encrypted,m.room.message,m.reaction
 ```
 
-## 9. Валидируемые инварианты
+## 10. Инварианты старта
 
-Будущее приложение должно падать на старте, если:
+Приложение должно завершаться с ошибкой на старте, если:
 
 - `SYNAPSE_BASE_URL` пустой;
 - `SYNAPSE_DB_URL` пустой;
-- `MATRIX_ACCESS_TOKEN` пустой в strict mode;
 - `TTL_HOURS <= 0`;
 - `BATCH_SIZE <= 0`;
 - `CRON_SCHEDULE` синтаксически невалиден;
 - `EVENT_TYPE_ALLOWLIST` пуст.
+
+## 11. Необходимые внешние предпосылки
+
+Текущая архитектура также предполагает, что в `Synapse DB` доступны:
+
+- локальные пользователи в таблице `users`;
+- токены пользователей в `access_tokens`;
+- текущий membership через `current_state_events` и `room_memberships`.

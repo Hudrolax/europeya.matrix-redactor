@@ -4,7 +4,13 @@ from sqlalchemy import create_engine
 
 from europeya_matrix_redactor.db.engine import build_synapse_engine
 from europeya_matrix_redactor.db.repositories import SynapseEventRepository
-from europeya_matrix_redactor.db.synapse_schema import access_tokens, users
+from europeya_matrix_redactor.db.synapse_schema import (
+    access_tokens,
+    current_state_events,
+    room_memberships,
+    users,
+)
+from europeya_matrix_redactor.dto import CandidateEvent
 from europeya_matrix_redactor.services.room_access import SenderScopeVerifier
 
 
@@ -45,6 +51,40 @@ def test_sender_scope_verifier_detects_local_remote_and_deactivated_users(make_s
                 },
             ],
         )
+        connection.execute(
+            current_state_events.insert(),
+            [
+                {
+                    "room_id": "!joined:example.com",
+                    "type": "m.room.member",
+                    "state_key": "@local:example.com",
+                    "event_id": "$join-local",
+                },
+                {
+                    "room_id": "!left:example.com",
+                    "type": "m.room.member",
+                    "state_key": "@local:example.com",
+                    "event_id": "$leave-local",
+                },
+            ],
+        )
+        connection.execute(
+            room_memberships.insert(),
+            [
+                {
+                    "event_id": "$join-local",
+                    "room_id": "!joined:example.com",
+                    "user_id": "@local:example.com",
+                    "membership": "join",
+                },
+                {
+                    "event_id": "$leave-local",
+                    "room_id": "!left:example.com",
+                    "user_id": "@local:example.com",
+                    "membership": "leave",
+                },
+            ],
+        )
     writer.dispose()
 
     engine = build_synapse_engine(f"sqlite+pysqlite:///{db_path}")
@@ -78,3 +118,24 @@ def test_sender_scope_verifier_detects_local_remote_and_deactivated_users(make_s
 
     assert statuses["@remote:elsewhere"].can_redact is False
     assert statuses["@remote:elsewhere"].failure_reason == "remote_user_unsupported"
+
+    membership_failures = verifier.find_room_membership_failures(
+        [
+            CandidateEvent(
+                event_id="$joined",
+                room_id="!joined:example.com",
+                sender="@local:example.com",
+                origin_server_ts=100,
+                event_type="m.room.message",
+            ),
+            CandidateEvent(
+                event_id="$left",
+                room_id="!left:example.com",
+                sender="@local:example.com",
+                origin_server_ts=100,
+                event_type="m.room.message",
+            ),
+        ],
+    )
+
+    assert membership_failures == {"$left": "sender_not_in_room"}

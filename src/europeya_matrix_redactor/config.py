@@ -36,7 +36,7 @@ class AppConfig(BaseSettings):
     synapse_db_url: str = Field(alias="SYNAPSE_DB_URL", min_length=1)
     ttl_hours: int = Field(default=24, alias="TTL_HOURS", gt=0)
     cron_schedule: str = Field(default="0 5 * * *", alias="CRON_SCHEDULE", min_length=1)
-    timezone: str = Field(default="Europe/Moscow", alias="TZ", min_length=1)
+    timezone: str = Field(default="UTC", alias="TZ", min_length=1)
     dry_run: bool = Field(default=False, alias="DRY_RUN")
     redaction_reason: str = Field(default="Expired by policy", alias="REDACTION_REASON", min_length=1)
     batch_size: int = Field(default=200, alias="BATCH_SIZE", gt=0)

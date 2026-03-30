@@ -1,203 +1,67 @@
 # europeya.matrix-redactor
 
-Документационный каркас проекта для server-side удаления сообщений Matrix/Synapse старше 24 часов через redaction.
-
-На этом этапе в проекте намеренно нет кода. Здесь зафиксированы архитектура, ограничения, эксплуатационные правила, схема compose-развёртывания и план реализации так, чтобы следующий проход мог написать приложение без повторного исследования предметной области.
+Документация текущей реализации проекта для server-side удаления Matrix-сообщений через `m.room.redaction`.
 
 ## Цель
 
-Сделать Python-приложение, которое:
+Приложение должно:
 
-- работает рядом с существующим `Synapse`;
-- запускается в Docker через `docker-compose`;
-- по расписанию запускает ежедневный sweep;
-- находит все сообщения старше 24 часов;
-- делает так, чтобы эти сообщения исчезали у клиентов, а не только удалялись из server-side media cache;
-- использует read-only доступ к БД `Synapse`;
-- использует SQLAlchemy, чтобы позднее можно было перейти с SQLite на PostgreSQL без переписывания бизнес-логики.
+- читать `Synapse DB` только в read-only режиме;
+- находить сообщения старше заданного TTL;
+- удалять их штатным Matrix-механизмом `redaction`;
+- выполнять обработку по расписанию или в one-shot режиме;
+- сохранять локальный журнал запусков и ошибок.
 
-## Ключевой вывод
+## Текущая архитектура
 
-Для задачи “сообщение должно исчезнуть у клиентов” базовым механизмом должен быть `redaction`, а не прямое удаление строк из БД и не `media_retention`.
-
-Почему:
-
-- `media_retention` удаляет только бинарные media-файлы, а не само событие сообщения;
-- прямое удаление строк из `events`/`event_json` не является штатным способом работы с `Synapse` и опасно для целостности room graph;
-- `retention` / `m.room.retention` полезны как политика TTL, но для федерации и точной эксплуатационной предсказуемости это более слабый вариант, чем явные redaction events;
-- `m.room.redaction` является стандартным Matrix-механизмом, который должен реплицироваться через федерацию.
-
-## Самое важное ограничение
-
-Если запускать job один раз в сутки, например в `05:00`, то это не “ровно через 24 часа после отправки”.
+Проект реализован в модели `local_user_access_token`.
 
 Это означает:
 
-- сообщение, отправленное в `04:59`, будет удалено почти через `24h`;
-- сообщение, отправленное в `05:01`, будет удалено только на следующем ежедневном проходе, почти через `48h`.
+- кандидатные события выбираются из `Synapse DB`;
+- поддерживаются только локальные пользователи homeserver;
+- для redaction используются уже существующие access token этих пользователей из `Synapse DB`;
+- перед redaction приложение проверяет, что пользователь активен, имеет валидный token и всё ещё состоит в комнате;
+- если пользователь уже покинул комнату, событие пропускается до HTTP-запроса;
+- запись в `Synapse DB` не выполняется ни при каких сценариях.
 
-Итог:
+## Ограничения
 
-- ежедневный запуск в `05:00` даёт ежедневный sweep по условию “старше 24 часов”;
-- если нужен реальный TTL, близкий к 24 часам, расписание надо делать как минимум почасовым.
+- события remote/federated отправителей не поддерживаются этой архитектурой;
+- локальный пользователь без валидного access token пропускается;
+- локальный пользователь, который уже не состоит в комнате, пропускается;
+- расписание вида `раз в сутки` даёт daily sweep, а не точный TTL ровно через 24 часа.
 
-Это ограничение принято осознанно и отражено во всех документах проекта.
+## Что входит в scope
 
-## Строгий и ограниченный режимы
-
-В проекте фиксируются два режима исполнения.
-
-### 1. Strict federated mode
-
-Основной и рекомендуемый режим.
-
-Идея:
-
-- приложение работает от имени отдельного Matrix-пользователя;
-- этот пользователь состоит в каждой комнате, которую надо обслуживать;
-- в каждой комнате у него есть право `redact` чужие события;
-- приложение читает БД только для отбора кандидатов;
-- сами redaction-события отправляются через обычный Matrix Client API.
-
-Плюсы:
-
-- можно адресно redaction'ить конкретные `event_id`;
-- работает и для локальных, и для federated пользователей;
-- даёт стандартный Matrix-эффект исчезновения сообщения у клиентов.
-
-Минусы:
-
-- сервисный пользователь должен быть добавлен во все комнаты;
-- для существующих приватных комнат и DM это меняет модель комнаты;
-- сервисному пользователю нужно выдать нужный `power level`.
-
-### 2. Local-only fallback mode
-
-Режим на случай, если бот не добавлен во все комнаты.
-
-Идея:
-
-- использовать admin token и Synapse Admin API `POST /_synapse/admin/v1/user/<user_id>/redact`;
-- применять его для локальных пользователей по комнатам.
-
-Ограничение:
-
-- это не гарантирует удаление событий federated пользователей во всех комнатах;
-- поэтому этот режим документируется как fallback, а не как целевая архитектура под ваше требование “все пользователи во всех чатах”.
-
-## Текущий серверный контекст, на котором проектировалась архитектура
-
-Срез на `2026-03-30` по серверу `45.134.27.106`:
-
-- `Synapse`: `1.134.0`
-- локальный HTTP endpoint `Synapse`: `http://127.0.0.1:8008`
-- текущая БД: SQLite
-- путь к БД: `/srv/matrix/synapse/homeserver.db`
-- активных локальных пользователей: `41`
-- активных локальных админов: `2`
-- комнат с текущими joined-участниками: `170`
-- сообщений-кандидатов старше 24 часов на момент исследования: `32480`
-
-Состав этих кандидатов:
-
-- `m.room.encrypted`: `31977`
-- `m.reaction`: `460`
-- `m.room.message`: `43`
-
-Это важно для проектирования:
-
-- основная нагрузка будет приходиться на `m.room.encrypted`;
-- E2EE не мешает redaction, но мешает server-side анализу содержимого сообщения;
-- отбор кандидатов должен опираться на event metadata, а не на расшифровку контента.
-- первый production-run на уже существующей истории может получить десятки тысяч кандидатов и должен рассматриваться как отдельный rollout-stage, а не как обычный ежедневный запуск.
-
-## Что именно входит в scope будущего приложения
-
-- read-only подключение к Synapse DB через SQLAlchemy;
-- выборка событий старше `TTL_HOURS`;
-- исключение уже отредактированных событий;
-- батчевое выполнение redaction по `event_id`;
-- dry-run режим;
-- журнал запусков и ошибок;
-- запуск по расписанию внутри контейнера;
-- ручной one-shot режим для тестов и аварийных прогонов;
-- конфиг через `.env`;
-- compose-спека для SQLite и задел под PostgreSQL.
+- read-only SQLAlchemy-слой для `Synapse DB`;
+- dry-run и real-run режимы;
+- batched redaction через Matrix Client API;
+- preflight-проверка sender scope и текущего membership;
+- локальный run journal;
+- Docker runtime со scheduler внутри контейнера.
 
 ## Что не входит в scope
 
-- прямое изменение таблиц `Synapse` для “удаления” сообщений;
-- удаление client-side cache на телефонах и компьютерах пользователей;
-- управление room power levels;
-- автоинвайт сервисного пользователя в существующие комнаты;
-- реализация E2EE-клиента или расшифровка `m.room.encrypted`;
-- миграция `Synapse` с SQLite на PostgreSQL.
+- прямое изменение таблиц `Synapse`;
+- восстановление уже отредактированных сообщений;
+- поддержка remote/federated отправителей в текущей архитектуре;
+- получение новых токенов через admin API;
+- расшифровка `m.room.encrypted`;
+- управление комнатами, power levels и членством пользователей.
 
 ## Структура документации
 
-- [docs/architecture.md](/Users/hudro/code/europeya.matrix-redactor/docs/architecture.md) — целевая архитектура и поток выполнения.
-- [docs/database-model.md](/Users/hudro/code/europeya.matrix-redactor/docs/database-model.md) — слой SQLAlchemy, таблицы Synapse и правила отбора событий.
-- [docs/runtime-compose.md](/Users/hudro/code/europeya.matrix-redactor/docs/runtime-compose.md) — как должно быть собрано и запущено в Docker/Compose.
-- [docs/configuration-reference.md](/Users/hudro/code/europeya.matrix-redactor/docs/configuration-reference.md) — переменные окружения и их смысл.
-- [docs/room-access-and-permissions.md](/Users/hudro/code/europeya.matrix-redactor/docs/room-access-and-permissions.md) — обязательные права сервисного пользователя и ограничения для федерации.
-- [docs/testing.md](/Users/hudro/code/europeya.matrix-redactor/docs/testing.md) — стратегия тестирования, dry-run, ручная и интеграционная проверка.
-- [docs/implementation-plan.md](/Users/hudro/code/europeya.matrix-redactor/docs/implementation-plan.md) — будущая структура файлов и модулей Python-проекта.
-- [docs/decision-log.md](/Users/hudro/code/europeya.matrix-redactor/docs/decision-log.md) — архитектурные решения и осознанно отвергнутые варианты.
-
-## Ожидаемая эксплуатационная схема
-
-1. Контейнер поднимается через `docker-compose`.
-2. Внутри контейнера крутится scheduler.
-3. В `05:00` scheduler запускает тот же `run-once`, который будет использоваться и вручную.
-4. `run-once` вычисляет `cutoff = now - 24h`.
-5. Приложение читает из Synapse DB только события-кандидаты.
-6. Для каждого события делается redaction через Matrix API.
-7. Успехи и ошибки пишутся в журнал запуска.
-8. Повторный запуск не трогает уже отредактированные события.
-
-## Почему именно SQLAlchemy
-
-SQLAlchemy нужен здесь не ради ORM “по привычке”, а ради слоя совместимости:
-
-- одна и та же логика отбора событий должна работать и с `sqlite+pysqlite`, и с `postgresql+psycopg`;
-- чтение из `Synapse` БД нужно держать отдельно от HTTP redaction-части;
-- SQLAlchemy Core хорошо подходит под read-only репозитории без лишнего состояния ORM;
-- слой запросов проще тестировать на копии боевой БД.
-
-## Как собирать, запускать и тестировать
-
-Подробно это описано в отдельных документах, но целевая эксплуатационная модель такая:
-
-- сборка образа: по `Dockerfile` на базе `python:3.13-slim`;
-- запуск: через `docker-compose up -d`;
-- ручной тестовый запуск: через отдельную one-shot команду с `DRY_RUN=true`;
-- SQLite-путь монтируется в контейнер read-only;
-- для SQLite желательно монтировать каталог БД, а не только один файл, чтобы не потерять `-wal` / `-shm`;
-- при переходе на PostgreSQL volume с БД больше не нужен, меняется только `SYNAPSE_DB_URL`.
-
-## Главные риски проекта
-
-- без сервисного пользователя с правом `redact` в комнате нельзя надёжно удалять события federated пользователей;
-- ежедневный запуск не означает “ровно 24 часа”;
-- массовый redaction десятков тысяч событий требует аккуратного батчинга и ограничения скорости;
-- первый реальный прогон на существующем сервере может занять существенно больше времени, чем последующие ежедневные запуски;
-- приватные комнаты и DM придётся обслуживать организационно, а не только технически;
-- часть старых сообщений может уже быть локально закэширована на клиентских устройствах, но redaction всё равно делает событие пустым и скрытым для Matrix-клиентов.
-
-## Следующий шаг после этой документации
-
-Следующий Codex-проход должен:
-
-1. создать Python-проект и `pyproject.toml`;
-2. реализовать SQLAlchemy-репозитории read-only к Synapse DB;
-3. реализовать Matrix HTTP client для redaction;
-4. реализовать dry-run и реальный режим;
-5. собрать Dockerfile и compose;
-6. написать тесты по сценариям из [testing.md](/Users/hudro/code/europeya.matrix-redactor/docs/testing.md).
+- [docs/architecture.md](/Users/hudro/code/europeya.matrix-redactor/docs/architecture.md) — поток выполнения и ключевые компоненты.
+- [docs/database-model.md](/Users/hudro/code/europeya.matrix-redactor/docs/database-model.md) — используемые таблицы и read-only запросы.
+- [docs/runtime-compose.md](/Users/hudro/code/europeya.matrix-redactor/docs/runtime-compose.md) — контейнерный runtime без привязки к конкретной среде.
+- [docs/configuration-reference.md](/Users/hudro/code/europeya.matrix-redactor/docs/configuration-reference.md) — актуальные переменные окружения.
+- [docs/room-access-and-permissions.md](/Users/hudro/code/europeya.matrix-redactor/docs/room-access-and-permissions.md) — ограничения текущей модели доступа.
+- [docs/testing.md](/Users/hudro/code/europeya.matrix-redactor/docs/testing.md) — стратегия тестирования и smoke-checks.
+- [docs/implementation-plan.md](/Users/hudro/code/europeya.matrix-redactor/docs/implementation-plan.md) — текущая структура кода и модулей.
+- [docs/decision-log.md](/Users/hudro/code/europeya.matrix-redactor/docs/decision-log.md) — принятые архитектурные решения.
 
 ## Источники
 
 - [Matrix Client-Server API: redact](https://spec.matrix.org/latest/client-server-api/index.html#put_matrixclientv3roomsroomidredacteventidtxnid)
-- [Synapse User Admin API](https://element-hq.github.io/synapse/latest/admin_api/user_admin_api.html)
-- [Synapse Purge History API](https://element-hq.github.io/synapse/latest/admin_api/purge_history_api.html)
 - [Synapse Message Retention Policies](https://element-hq.github.io/synapse/latest/message_retention_policies.html)

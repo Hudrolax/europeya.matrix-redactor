@@ -4,7 +4,15 @@ from sqlalchemy import create_engine
 
 from europeya_matrix_redactor.db.engine import build_synapse_engine
 from europeya_matrix_redactor.db.repositories import SynapseEventRepository
-from europeya_matrix_redactor.db.synapse_schema import access_tokens, events, redactions, user_ips, users
+from europeya_matrix_redactor.db.synapse_schema import (
+    access_tokens,
+    current_state_events,
+    events,
+    redactions,
+    room_memberships,
+    user_ips,
+    users,
+)
 
 
 def test_candidate_repository_filters_redacted_state_and_recent_events(
@@ -175,6 +183,40 @@ def test_candidate_repository_filters_redacted_state_and_recent_events(
                 },
             ],
         )
+        connection.execute(
+            current_state_events.insert(),
+            [
+                {
+                    "room_id": "!room-a:example.com",
+                    "type": "m.room.member",
+                    "state_key": "@alice:example.com",
+                    "event_id": "$alice-join",
+                },
+                {
+                    "room_id": "!room-b:example.com",
+                    "type": "m.room.member",
+                    "state_key": "@bob:example.com",
+                    "event_id": "$bob-leave",
+                },
+            ],
+        )
+        connection.execute(
+            room_memberships.insert(),
+            [
+                {
+                    "event_id": "$alice-join",
+                    "room_id": "!room-a:example.com",
+                    "user_id": "@alice:example.com",
+                    "membership": "join",
+                },
+                {
+                    "event_id": "$bob-leave",
+                    "room_id": "!room-b:example.com",
+                    "user_id": "@bob:example.com",
+                    "membership": "leave",
+                },
+            ],
+        )
     writer.dispose()
 
     engine = build_synapse_engine(f"sqlite+pysqlite:///{db_path}")
@@ -207,6 +249,15 @@ def test_candidate_repository_filters_redacted_state_and_recent_events(
         ) == {
             "@alice:example.com": ["alice-new", "alice-old"],
             "@bob:example.com": ["bob-active"],
+        }
+        assert repository.get_joined_room_memberships(
+            [
+                ("@alice:example.com", "!room-a:example.com"),
+                ("@bob:example.com", "!room-b:example.com"),
+                ("@remote:elsewhere", "!room-a:example.com"),
+            ],
+        ) == {
+            ("@alice:example.com", "!room-a:example.com"),
         }
 
         batches = list(repository.iter_candidates(1_000, allowlist, batch_size=1))

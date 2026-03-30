@@ -1,12 +1,13 @@
-# План реализации
+# Текущая структура реализации
 
-Этот документ нужен, чтобы следующий проход мог сразу писать проект без дополнительного архитектурного ресёрча.
+Файл сохранён под историческим именем, но описывает текущую структуру кода, а не будущий план.
 
-## 1. Рекомендуемая структура файлов
+## 1. Структура репозитория
 
 ```text
 europeya.matrix-redactor/
 ├── AGENTS.md
+├── README.md
 ├── pyproject.toml
 ├── .env.example
 ├── Dockerfile
@@ -27,191 +28,107 @@ europeya.matrix-redactor/
 │       ├── __init__.py
 │       ├── cli.py
 │       ├── config.py
-│       ├── logging.py
-│       ├── scheduler.py
 │       ├── dto.py
 │       ├── locks.py
+│       ├── logging.py
+│       ├── scheduler.py
+│       ├── clients/
+│       │   └── matrix_client.py
 │       ├── db/
-│       │   ├── __init__.py
-│       │   ├── engine.py
-│       │   ├── synapse_schema.py
 │       │   ├── app_state_schema.py
-│       │   └── repositories.py
-│       ├── services/
-│       │   ├── planner.py
-│       │   ├── room_access.py
-│       │   ├── executor.py
-│       │   └── run_journal.py
-│       └── clients/
-│           ├── __init__.py
-│           └── matrix_client.py
+│       │   ├── engine.py
+│       │   ├── repositories.py
+│       │   └── synapse_schema.py
+│       └── services/
+│           ├── executor.py
+│           ├── planner.py
+│           ├── room_access.py
+│           └── run_journal.py
 └── tests/
+    ├── conftest.py
     ├── test_config.py
-    ├── test_repositories.py
     ├── test_executor.py
-    ├── test_room_access.py
-    └── fixtures/
+    ├── test_repositories.py
+    └── test_room_access.py
 ```
 
-## 2. Ответственность модулей
+## 2. Основные точки входа
 
 ### `cli.py`
 
-Должен поддерживать команды:
+Поддерживает команды:
 
 - `run-once`
-- `healthcheck`
 - `dry-run-report`
+- `healthcheck`
+- `render-crontab`
 
 ### `config.py`
 
-Должен:
-
-- читать `.env`;
-- валидировать значения;
-- нормализовать allowlist;
-- возвращать строго типизированный config object.
-
-### `db/engine.py`
-
-Должен:
-
-- строить SQLAlchemy engine;
-- настраивать read-only подключение к `Synapse DB`;
-- поддерживать SQLite и PostgreSQL.
-
-### `db/synapse_schema.py`
-
-Должен описывать нужные таблицы:
-
-- `events`
-- `redactions`
-- `event_json`
-- `current_state_events`
-- `room_memberships`
-- `users`
-
-### `db/app_state_schema.py`
-
-Должен описывать локальные таблицы приложения:
-
-- `runs`
-- `run_failures`
-- возможно, `room_preflight_failures`
-
-### `db/repositories.py`
-
-Должен содержать:
-
-- `SynapseEventRepository`
-- `RoomStateRepository`
-- `RunJournalRepository`
-
-### `services/planner.py`
-
-Должен:
-
-- считать `cutoff`;
-- выбирать кандидатов батчами;
-- выдавать execution plan;
-- поддерживать dry-run summary.
-
-### `services/room_access.py`
-
-Должен:
-
-- проверять доступ сервисного пользователя к комнате;
-- при необходимости читать `m.room.power_levels`;
-- возвращать структурированный статус комнаты.
-
-### `services/executor.py`
-
-Должен:
-
-- вызывать Matrix redaction endpoint;
-- делать retries для retryable ошибок;
-- возвращать результаты по каждому `event_id`.
-
-### `services/run_journal.py`
-
-Должен:
-
-- фиксировать старт запуска;
-- писать summary;
-- писать ошибки;
-- обновлять итоговый статус run.
+Содержит typed-конфиг приложения и валидацию `.env`.
 
 ### `clients/matrix_client.py`
 
-Должен:
+Инкапсулирует Matrix HTTP API:
 
-- инкапсулировать HTTP-вызовы к `Synapse`;
-- поддерживать redaction endpoint;
-- уметь делать healthcheck.
-
-## 3. Предлагаемая последовательность реализации
-
-### Этап 1. Каркас проекта
-
-- `pyproject.toml`
-- package layout
-- config loader
-- logging
-- CLI skeleton
-
-### Этап 2. Read-only DB слой
-
-- SQLAlchemy schema
-- engine factory
-- repository queries
-- unit tests на fixture SQLite
-
-### Этап 3. Matrix client
-
-- healthcheck
-- redaction call
-- error mapping
+- `healthcheck`
+- `redact_event`
 - retry policy
 
-### Этап 4. Planner и executor
+## 3. Read-only DB слой
 
-- dry-run
-- batch iteration
-- room access verifier
-- real-run execution
+### `db/synapse_schema.py`
 
-### Этап 5. Runtime
+Описывает используемые таблицы `Synapse`, включая:
 
-- Dockerfile
-- crontab
-- docker-compose
-- healthcheck
+- `events`
+- `redactions`
+- `users`
+- `access_tokens`
+- `user_ips`
+- `current_state_events`
+- `room_memberships`
 
-### Этап 6. Acceptance
+### `db/repositories.py`
 
-- dry-run на реальной БД
-- тестовая комната
-- federated room
-- идемпотентность
+Содержит read-only методы для:
 
-## 4. Библиотеки, которые стоит рассмотреть
+- выборки кандидатов;
+- sender scope;
+- token lookup;
+- current room membership;
+- записи run journal в локальную state DB.
 
-- `sqlalchemy`
-- `pydantic-settings` или `pydantic`
-- `httpx`
-- `tenacity`
-- `structlog` или стандартный `logging` с JSON formatter
-- `pytest`
+## 4. Сервисный слой
 
-Для PostgreSQL:
+### `services/planner.py`
 
-- `psycopg`
+Считает cutoff и формирует dry-run summary.
 
-## 5. Формат DTO и доменных сущностей
+### `services/room_access.py`
+
+Проверяет:
+
+- локальность пользователя;
+- состояние `deactivated`;
+- наличие токена;
+- текущий membership в комнате.
+
+### `services/executor.py`
+
+Исполняет batch redaction и различает:
+
+- skipped по sender scope;
+- skipped по room membership;
+- retryable/permanent HTTP failures.
+
+### `services/run_journal.py`
+
+Фиксирует lifecycle запуска в локальной state DB.
+
+## 5. Текущая модель данных в DTO
 
 ### `CandidateEvent`
-
-Поля:
 
 - `event_id`
 - `room_id`
@@ -219,56 +136,33 @@ europeya.matrix-redactor/
 - `origin_server_ts`
 - `event_type`
 
-### `RoomAccessStatus`
+### `SenderScopeStatus`
 
-Поля:
-
-- `room_id`
-- `membership_ok`
-- `power_level_ok`
+- `user_id`
+- `is_local`
+- `is_active`
+- `has_access_token`
 - `mode`
 - `failure_reason`
 
 ### `RedactionResult`
 
-Поля:
-
 - `event_id`
 - `room_id`
+- `sender`
 - `success`
 - `retryable`
+- `failure_kind`
 - `http_status`
 - `error_message`
 - `redaction_event_id`
 
-## 6. Что должно быть реализовано в первом релизе обязательно
+## 6. Что именно реализовано в репозитории
 
-- strict bot mode;
-- dry-run;
-- one-shot run;
-- scheduler run;
-- local run journal;
-- idempotent selection;
-- batch processing;
-- structured logs.
-
-## 7. Что можно оставить на второй релиз
-
-- local-only admin fallback mode;
-- расширенный отчёт по комнатам;
-- Prometheus metrics;
-- экспорт отчёта в файл;
-- конфигурируемые event type beyond default allowlist;
-- отдельная preflight-команда.
-
-## 8. Acceptance checklist для следующего прохода
-
-Будущий код нельзя считать завершённым, пока не будут готовы:
-
-- `README` обновлён под фактическую реализацию;
-- `.env.example` совпадает с кодом;
-- `docker-compose.yml` совпадает с runtime-моделью;
-- есть тесты на SQLAlchemy-репозитории;
-- есть dry-run и real-run;
-- есть блокировка overlap;
-- есть хотя бы один документированный сценарий ручного теста.
+- read-only интеграция с `Synapse DB`;
+- local-user access-token redaction path;
+- preflight skip для пользователей вне комнаты;
+- dry-run summary;
+- run journal;
+- Docker runtime со scheduler;
+- unit и repository tests для ключевых сценариев.

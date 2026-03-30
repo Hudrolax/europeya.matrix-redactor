@@ -63,6 +63,7 @@ class RedactionResult:
     sender: str
     success: bool
     retryable: bool
+    failure_kind: str | None = None
     http_status: int | None = None
     error_message: str | None = None
     redaction_event_id: str | None = None

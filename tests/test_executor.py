@@ -122,4 +122,43 @@ def test_redaction_executor_skips_remote_sender() -> None:
 
     assert result.success is False
     assert result.retryable is False
+    assert result.failure_kind == "sender_scope"
     assert result.error_message == "sender scope failed: remote_user_unsupported"
+
+
+def test_redaction_executor_skips_sender_not_in_room_without_http_call() -> None:
+    class UnexpectedClient:
+        def redact_event(self, room_id: str, event_id: str, reason: str) -> str:
+            raise AssertionError(f"unexpected redaction call for {room_id} {event_id} {reason}")
+
+    executor = RedactionExecutor(
+        client_provider=lambda sender: UnexpectedClient(),  # type: ignore[arg-type]
+        redaction_reason="Expired by policy",
+        rate_limit_sleep_ms=0,
+    )
+    candidate = CandidateEvent(
+        event_id="$event",
+        room_id="!room:example.com",
+        sender="@alice:example.com",
+        origin_server_ts=100,
+        event_type="m.room.message",
+    )
+    status = SenderScopeStatus(
+        user_id="@alice:example.com",
+        is_local=True,
+        is_active=True,
+        has_access_token=True,
+        mode="local_user_access_token",
+        failure_reason=None,
+    )
+
+    result = executor.execute_candidate(
+        candidate,
+        status,
+        room_membership_failure_reason="sender_not_in_room",
+    )
+
+    assert result.success is False
+    assert result.retryable is False
+    assert result.failure_kind == "room_membership"
+    assert result.error_message == "room membership failed: sender_not_in_room"

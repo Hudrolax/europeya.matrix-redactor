@@ -4,32 +4,27 @@
 
 `Synapse DB` в этом проекте является только read-side источником данных.
 
-Это означает:
+Приложение:
 
-- приложение читает таблицы `Synapse`;
-- приложение не изменяет таблицы `Synapse`;
-- удаление сообщений выполняется через Matrix API, а не SQL `DELETE`.
+- читает таблицы `Synapse`;
+- не изменяет таблицы `Synapse`;
+- выполняет write-side действия только через Matrix API.
 
 ## 2. Почему SQLAlchemy Core
 
-Для этого проекта лучше подходит `SQLAlchemy Core`, а не “толстый ORM”.
+Для проекта подходит `SQLAlchemy Core`, потому что нужен переносимый read-only query layer:
 
-Причины:
+- без heavy ORM lifecycle;
+- с явными join и батчевыми select;
+- с одинаковой логикой для SQLite и PostgreSQL.
 
-- запросы простые, но чувствительные к диалекту;
-- нужен перенос между SQLite и PostgreSQL;
-- read-only таблицы `Synapse` не требуют ORM lifecycle;
-- Core удобен для батчевых селектов и явных join.
-
-ORM допускается только для локальной БД самого приложения, если это упростит журнал запусков.
-
-## 3. Таблицы Synapse, которые нужны в первом релизе
+## 3. Таблицы, используемые текущей реализацией
 
 ### `events`
 
-Главная таблица для первичной выборки.
+Источник кандидатных сообщений.
 
-Нас интересуют поля:
+Ключевые поля:
 
 - `event_id`
 - `room_id`
@@ -40,74 +35,54 @@ ORM допускается только для локальной БД само�
 - `rejection_reason`
 - `state_key`
 
-Фактическая схема на сервере:
-
-- `stream_ordering INTEGER PRIMARY KEY`
-- `event_id TEXT UNIQUE`
-- `type TEXT`
-- `room_id TEXT`
-- `origin_server_ts BIGINT`
-- `sender TEXT`
-- `outlier BOOL`
-- `state_key TEXT`
-- `rejection_reason TEXT`
-
 ### `redactions`
 
-Нужна для исключения уже обработанных событий.
+Используется для исключения уже обработанных событий.
 
-Критичное поле:
+Ключевое поле:
 
 - `redacts`
 
-Фактическая схема на сервере:
+### `users`
 
-- `event_id TEXT`
-- `redacts TEXT`
-- `have_censored BOOL`
-- `received_ts BIGINT`
+Используется для sender scope:
 
-### `event_json`
+- локальный ли пользователь;
+- деактивирован ли он.
 
-Нужна как вспомогательная таблица.
+### `access_tokens`
 
-Первый релиз может использовать её минимально, но она понадобится:
+Используется для получения существующих access token локальных пользователей.
 
-- для room state inspection;
-- для анализа `m.room.power_levels`;
-- для будущих расширений логики отбора.
+Ключевые поля:
+
+- `user_id`
+- `token`
+- `valid_until_ms`
+- `puppets_user_id`
+- `last_validated`
+
+### `user_ips`
+
+Нужна для выбора наиболее актуального токена по `last_seen`.
+
+Ключевые поля:
+
+- `user_id`
+- `access_token`
+- `last_seen`
 
 ### `current_state_events`
 
-Нужна для анализа текущего состояния комнаты.
-
-Возможные применения:
-
-- проверить membership сервисного пользователя;
-- получить ссылки на актуальные state events;
-- определить наличие `m.room.power_levels`.
+Используется для проверки текущего membership пользователя в комнате.
 
 ### `room_memberships`
 
-Нужна как вспомогательный read-only источник по membership history.
-
-Полезна для:
-
-- отладки;
-- аналитики проблемных комнат;
-- будущих расширений preflight-логики.
-
-### `users`
-
-Не нужна для строгого bot-mode, но нужна:
-
-- для local-only fallback mode;
-- для административной аналитики;
-- для preflight отчёта по локальным пользователям.
+Используется вместе с `current_state_events`, чтобы определить, имеет ли пользователь `join` membership на момент redaction.
 
 ## 4. Базовый запрос кандидатов
 
-Логический запрос:
+Логический контракт:
 
 ```sql
 SELECT
@@ -129,151 +104,91 @@ ORDER BY e.origin_server_ts ASC
 LIMIT :batch_size;
 ```
 
-Это не приложение и не готовый код, а контракт запроса, который затем будет выражен через SQLAlchemy Core.
+## 5. Запрос sender scope
 
-## 5. Что реально известно по индексам на боевой БД
+Приложению нужно для каждого отправителя знать:
 
-На сервере `45.134.27.106` найдены такие индексы:
+- присутствует ли он в `users`;
+- деактивирован ли;
+- есть ли у него валидный токен.
 
-- `events_ts` на `events(origin_server_ts)`
-- `redactions_redacts` на `redactions(redacts)`
-- несколько служебных индексов на membership/state таблицах
+Практически это означает:
 
-План реального запроса показал:
+- lookup в `users`;
+- lookup в `access_tokens`;
+- optional ranking токенов через `user_ips.last_seen`.
 
-- поиск по `events` идёт через `events_ts`;
-- join на `redactions` идёт через `redactions_redacts`.
+## 6. Запрос текущего membership
 
-Практический вывод:
+До HTTP redaction приложение должно проверить, что пользователь всё ещё состоит в комнате.
 
-- правило отбора по `origin_server_ts` пригодно для production;
-- batched scan можно строить именно от временного cutoff;
-- отдельный локальный checkpoint по `stream_ordering` не обязателен в первом релизе.
+Логический контракт:
 
-## 6. Набор event type по умолчанию
+```sql
+SELECT
+  cse.state_key AS user_id,
+  cse.room_id
+FROM current_state_events cse
+JOIN room_memberships rm
+  ON rm.event_id = cse.event_id
+WHERE cse.type = 'm.room.member'
+  AND rm.membership = 'join'
+  AND (cse.state_key, cse.room_id) IN (:sender_room_pairs);
+```
 
-Безопасный allowlist для первого релиза:
+Если пары `sender + room_id` нет в результате, redaction по такому событию не должен выполняться.
+
+## 7. Why allowlist
+
+Allowlist по умолчанию:
 
 - `m.room.encrypted`
 - `m.room.message`
 - `m.reaction`
 
-Почему не брать “все события с `state_key IS NULL`”:
+Это безопаснее, чем redaction всех non-state событий, потому что:
 
-- туда могут попасть служебные события, которые пользователь не воспринимает как сообщения;
-- для первого релиза нужен консервативный набор;
-- расширение списка должно быть конфигурационным.
+- снижает риск затронуть служебные типы;
+- делает поведение конфигурируемым;
+- упрощает dry-run интерпретацию.
 
-На текущем сервере почти весь пользовательский поток уже покрывается этим allowlist.
+## 8. Индексы и практические ожидания
 
-## 7. Как выражать это через SQLAlchemy
+Для нормальной работы желательно, чтобы база имела индексы как минимум на:
 
-Рекомендуемая структура read-side слоя:
+- `events(origin_server_ts)`
+- `redactions(redacts)`
 
-- `SynapseEventRepository`
-- `RoomStateRepository`
-- `SynapseDialectFactory`
+Membership-проверка также выигрывает от индексов текущего state и membership таблиц, но проект не зависит от конкретных имен индексов.
 
-### `SynapseEventRepository`
+## 9. SQLite-особенности
 
-Отвечает за:
+Для SQLite желательно монтировать каталог БД целиком, а не только один файл, потому что возможны sidecar-файлы:
 
-- выборку батча кандидатов;
-- count кандидатов для dry-run summary;
-- выборку по room/user/time при отладке.
+- `*.db-wal`
+- `*.db-shm`
 
-### `RoomStateRepository`
-
-Отвечает за:
-
-- получение текущих membership state;
-- получение `m.room.power_levels`;
-- проверку room capability для сервисного пользователя.
-
-### `SynapseDialectFactory`
-
-Отвечает за:
-
-- создание engine/session;
-- одинаковую настройку SQLite и PostgreSQL;
-- read-only connect options.
-
-## 8. SQLite-особенности
-
-Для SQLite в compose нужно учитывать не только `homeserver.db`, но и возможные sidecar-файлы:
-
-- `homeserver.db-wal`
-- `homeserver.db-shm`
-
-Поэтому лучше монтировать каталог БД целиком read-only:
-
-- `/srv/matrix/synapse:/opt/synapse:ro`
-
-А уже внутри контейнера использовать:
+В контейнере приложение работает только с логическим DSN, например:
 
 - `sqlite+pysqlite:////opt/synapse/homeserver.db`
 
-## 9. PostgreSQL-особенности
+## 10. Контракт репозитория
 
-При переходе на PostgreSQL меняться должны только:
+`SynapseEventRepository` должен уметь:
 
-- DSN;
-- драйвер;
-- возможно, таймауты и pool settings.
+- `count_candidates(...)`
+- `count_candidates_by_type(...)`
+- `count_candidates_by_room(...)`
+- `count_candidates_by_sender(...)`
+- `sample_candidates(...)`
+- `iter_candidates(...)`
+- `get_sender_profiles(...)`
+- `get_sender_tokens(...)`
+- `get_joined_room_memberships(...)`
 
-Бизнес-логика не должна зависеть от:
+## 11. Что нельзя делать в SQLAlchemy-слое
 
-- sqlite-specific pragma;
-- `rowid`;
-- локальных путей;
-- ручного парсинга JSON через SQLite-функции.
-
-## 10. Локальная БД приложения
-
-Отдельно от `Synapse DB` допустимо держать internal state DB.
-
-Она нужна для:
-
-- run journal;
-- сведений о неудачных redaction;
-- lock state;
-- аудита.
-
-Рекомендуемая технология:
-
-- ещё одна SQLite БД приложения под SQLAlchemy.
-
-Это нормально, потому что:
-
-- она не вмешивается в `Synapse`;
-- её schema контролирует само приложение.
-
-## 11. Контракт репозиториев для будущей реализации
-
-Минимальный интерфейс:
-
-- `count_candidates(cutoff_ms, allowlist) -> int`
-- `iter_candidates(cutoff_ms, allowlist, batch_size) -> Iterator[list[CandidateEvent]]`
-- `get_room_access_snapshot(room_ids, service_user_id) -> dict`
-- `get_power_levels(room_ids) -> dict`
-
-Минимальный DTO `CandidateEvent`:
-
-- `event_id`
-- `room_id`
-- `sender`
-- `origin_server_ts`
-- `event_type`
-
-## 12. Что нельзя делать в SQLAlchemy-слое
-
-- не redaction'ить события напрямую через SQL;
-- не записывать что-либо в таблицы `Synapse`;
-- не завязываться на текущее содержимое `event_json` для E2EE message body;
-- не полагаться на расшифровку `m.room.encrypted`.
-
-Итог:
-
-- SQLAlchemy-слой здесь нужен как переносимый read-only query layer;
-- write-side логика находится только в HTTP client слое.
-
+- не писать в таблицы `Synapse`;
+- не удалять события через SQL;
+- не полагаться на расшифровку `m.room.encrypted`;
+- не смешивать read-side `Synapse` schema с local state schema приложения.

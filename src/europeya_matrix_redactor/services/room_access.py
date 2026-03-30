@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from europeya_matrix_redactor.dto import RedactionMode, SenderScopeStatus
+from europeya_matrix_redactor.dto import CandidateEvent, RedactionMode, SenderScopeStatus
 
 
 class SenderScopeVerifier:
@@ -43,3 +43,20 @@ class SenderScopeVerifier:
             )
 
         return statuses
+
+    def find_room_membership_failures(
+        self,
+        candidates: Iterable[CandidateEvent],
+    ) -> dict[str, str]:
+        candidate_list = tuple(candidates)
+        joined_pairs = self.repository.get_joined_room_memberships(
+            (candidate.sender, candidate.room_id)
+            for candidate in candidate_list
+        )
+        failures: dict[str, str] = {}
+
+        for candidate in candidate_list:
+            if (candidate.sender, candidate.room_id) not in joined_pairs:
+                failures[candidate.event_id] = "sender_not_in_room"
+
+        return failures
