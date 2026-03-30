@@ -4,7 +4,9 @@ import argparse
 import json
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
+from threading import Lock
 
 from europeya_matrix_redactor.clients.matrix_client import MatrixClient, MatrixRequestError
 from europeya_matrix_redactor.config import AppConfig, load_config
@@ -23,6 +25,7 @@ from europeya_matrix_redactor.services.executor import RedactionExecutor
 from europeya_matrix_redactor.services.planner import RedactionPlanner
 from europeya_matrix_redactor.services.room_access import SenderScopeVerifier
 from europeya_matrix_redactor.services.run_journal import RunJournalService
+from europeya_matrix_redactor.services.sender_round_robin import SenderRoundRobinScheduler
 
 DEFAULT_SAMPLE_SIZE = 10
 
@@ -232,35 +235,42 @@ def _execute_locked_run(
             current_time_ms,
         )
         sender_clients: dict[str, SenderTokenClient] = {}
+        sender_clients_lock = Lock()
 
         def get_client_for_sender(sender: str) -> SenderTokenClient:
-            cached_client = sender_clients.get(sender)
-            if cached_client is not None:
-                return cached_client
+            with sender_clients_lock:
+                cached_client = sender_clients.get(sender)
+                if cached_client is not None:
+                    return cached_client
 
-            access_tokens = sender_tokens.get(sender, [])
-            if not access_tokens:
-                raise MatrixRequestError(
-                    message=f"no valid access token for {sender}",
-                    retryable=False,
+                access_tokens = sender_tokens.get(sender, [])
+                if not access_tokens:
+                    raise MatrixRequestError(
+                        message=f"no valid access token for {sender}",
+                        retryable=False,
+                    )
+
+                client = SenderTokenClient(
+                    base_url=config.synapse_base_url,
+                    access_tokens=access_tokens,
+                    timeout_seconds=config.request_timeout_seconds,
+                    max_retries=config.max_retries,
+                    rate_limit_sleep_ms=config.rate_limit_sleep_ms,
                 )
-
-            client = SenderTokenClient(
-                base_url=config.synapse_base_url,
-                access_tokens=access_tokens,
-                timeout_seconds=config.request_timeout_seconds,
-                max_retries=config.max_retries,
-                rate_limit_sleep_ms=config.rate_limit_sleep_ms,
-            )
-            sender_clients[sender] = client
-            return client
+                sender_clients[sender] = client
+                return client
 
         executor = RedactionExecutor(
             client_provider=get_client_for_sender,
             redaction_reason=config.redaction_reason,
             rate_limit_sleep_ms=config.rate_limit_sleep_ms,
         )
+        round_robin_scheduler = SenderRoundRobinScheduler(
+            max_concurrent_senders=config.max_concurrent_senders,
+        )
         try:
+            eligible_candidates_by_sender: OrderedDict[str, list] = OrderedDict()
+
             for batch in planner.iter_candidate_batches(
                 cutoff_ms=cutoff_ms,
                 allowlist=config.event_type_allowlist,
@@ -277,16 +287,20 @@ def _execute_locked_run(
                     membership_checked_candidates,
                 )
 
-                for result in executor.execute_batch(
-                    batch,
-                    sender_scope_map,
-                    room_membership_failures,
-                ):
-                    if result.success:
-                        success_count += 1
-                        continue
+                for candidate in batch:
+                    sender_status = sender_scope_map.get(candidate.sender)
+                    room_membership_failure_reason = room_membership_failures.get(candidate.event_id)
 
-                    if result.failure_kind in {"sender_scope", "room_membership"}:
+                    if (
+                        sender_status is None
+                        or not sender_status.can_redact
+                        or room_membership_failure_reason is not None
+                    ):
+                        result = executor.execute_candidate(
+                            candidate,
+                            sender_status,
+                            room_membership_failure_reason=room_membership_failure_reason,
+                        )
                         skipped_count += 1
                         journal.record_failure(
                             run_id,
@@ -297,8 +311,21 @@ def _execute_locked_run(
                         )
                         continue
 
-                    failure_count += 1
-                    journal.record_redaction_result(run_id, result)
+                    eligible_candidates_by_sender.setdefault(candidate.sender, []).append(candidate)
+
+            for result in round_robin_scheduler.run(
+                eligible_candidates_by_sender,
+                lambda candidate: executor.execute_candidate(
+                    candidate,
+                    sender_scope_map.get(candidate.sender),
+                ),
+            ):
+                if result.success:
+                    success_count += 1
+                    continue
+
+                failure_count += 1
+                journal.record_redaction_result(run_id, result)
         finally:
             for client in sender_clients.values():
                 client.close()

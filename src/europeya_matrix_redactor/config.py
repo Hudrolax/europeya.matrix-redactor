@@ -40,9 +40,10 @@ class AppConfig(BaseSettings):
     dry_run: bool = Field(default=False, alias="DRY_RUN")
     redaction_reason: str = Field(default="Expired by policy", alias="REDACTION_REASON", min_length=1)
     batch_size: int = Field(default=200, alias="BATCH_SIZE", gt=0)
+    max_concurrent_senders: int = Field(default=8, alias="MAX_CONCURRENT_SENDERS", gt=0)
     request_timeout_seconds: float = Field(default=15.0, alias="REQUEST_TIMEOUT_SECONDS", gt=0)
     max_retries: int = Field(default=3, alias="MAX_RETRIES", ge=0)
-    rate_limit_sleep_ms: int = Field(default=200, alias="RATE_LIMIT_SLEEP_MS", ge=0)
+    rate_limit_sleep_ms: int = Field(default=0, alias="RATE_LIMIT_SLEEP_MS", ge=0)
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     app_state_db_url: str = Field(
         default="sqlite+pysqlite:////app/var/state.db",

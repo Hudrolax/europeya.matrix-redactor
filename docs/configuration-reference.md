@@ -120,6 +120,23 @@ REDACTION_REASON=Expired by policy
 BATCH_SIZE=200
 ```
 
+Назначение:
+
+- размер SQL-batch при чтении кандидатов из `Synapse DB`.
+
+### `MAX_CONCURRENT_SENDERS`
+
+Пример:
+
+```env
+MAX_CONCURRENT_SENDERS=8
+```
+
+Назначение:
+
+- максимальное число sender, которые могут redaction'ить параллельно;
+- внутри одного sender одновременно выполняется только один HTTP-запрос.
+
 ### `REQUEST_TIMEOUT_SECONDS`
 
 Пример:
@@ -141,12 +158,13 @@ MAX_RETRIES=3
 Пример:
 
 ```env
-RATE_LIMIT_SLEEP_MS=200
+RATE_LIMIT_SLEEP_MS=0
 ```
 
 Назначение:
 
 - дополнительная искусственная пауза между запросами;
+- обычно должна быть `0`, потому что основное управление rate limit выполняется через `retry_after_ms` и sender-aware scheduler;
 - не заменяет встроенную обработку `429`.
 
 ## 6. Логирование и локальное состояние
@@ -216,9 +234,10 @@ TZ=UTC
 DRY_RUN=true
 REDACTION_REASON=Expired by policy
 BATCH_SIZE=200
+MAX_CONCURRENT_SENDERS=8
 REQUEST_TIMEOUT_SECONDS=15
 MAX_RETRIES=3
-RATE_LIMIT_SLEEP_MS=200
+RATE_LIMIT_SLEEP_MS=0
 LOG_LEVEL=INFO
 APP_STATE_DB_URL=sqlite+pysqlite:////app/var/state.db
 LOCK_FILE_PATH=/app/var/run.lock

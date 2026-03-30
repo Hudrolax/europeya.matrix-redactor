@@ -19,6 +19,8 @@ def test_config_normalizes_allowlist_and_base_url(tmp_path: Path) -> None:
 
     assert config.synapse_base_url == "http://synapse.local"
     assert config.event_type_allowlist == ("m.room.message", "m.room.encrypted")
+    assert config.max_concurrent_senders == 8
+    assert config.rate_limit_sleep_ms == 0
 
 
 def test_config_rejects_invalid_cron_schedule(tmp_path: Path) -> None:

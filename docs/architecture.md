@@ -73,6 +73,8 @@ Read-only слой на SQLAlchemy Core для:
 Для каждого допустимого `event_id`:
 
 - берёт лучший доступный token пользователя;
+- не отправляет одновременно несколько redaction для одного и того же sender;
+- выполняет разных sender параллельно в round-robin порядке;
 - делает redaction через Matrix Client API;
 - разделяет permanent и retryable ошибки.
 
@@ -90,7 +92,7 @@ flowchart TD
     D --> E["Read candidate events in batches"]
     E --> F["Verify sender scope"]
     F --> G["Verify sender still joined in room"]
-    G --> H["Send Matrix redactions with sender token"]
+    G --> H["Build sender queues and run round-robin redactions"]
     H --> I["Persist run summary and failures"]
     I --> J["Exit"]
 ```
@@ -110,7 +112,8 @@ sequenceDiagram
     D-->>A: sender scope snapshot
     A->>D: verify sender current membership is join
     D-->>A: room membership snapshot
-    loop for each eligible candidate
+    A->>A: group eligible candidates by sender
+    loop round-robin across sender queues
         A->>M: PUT /rooms/{roomId}/redact/{eventId}/{txnId}
         M-->>A: success or error
     end
@@ -160,6 +163,8 @@ Allowlist по умолчанию:
 - `5xx`
 - timeout
 - транспортные сбои
+
+`429` обрабатывается по `retry_after_ms`, но cooldown применяется только к sender, который получил лимит. Другие sender могут продолжать redaction параллельно.
 
 ### Permanent
 
