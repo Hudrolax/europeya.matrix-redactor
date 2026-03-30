@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import TypeVar
 
@@ -20,18 +20,24 @@ class SenderRoundRobinScheduler:
         items_by_sender: Mapping[str, Sequence[T]],
         worker: Callable[[T], R],
     ) -> list[R]:
+        return list(self.iter_results(items_by_sender, worker))
+
+    def iter_results(
+        self,
+        items_by_sender: Mapping[str, Sequence[T]],
+        worker: Callable[[T], R],
+    ) -> Iterator[R]:
         sender_queues = {
             sender: deque(items)
             for sender, items in items_by_sender.items()
             if items
         }
         if not sender_queues:
-            return []
+            return
 
         max_workers = min(self.max_concurrent_senders, len(sender_queues))
         ready_senders = deque(sender_queues.keys())
         in_flight: dict[Future[R], str] = {}
-        results: list[R] = []
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             self._fill_worker_pool(
@@ -47,7 +53,7 @@ class SenderRoundRobinScheduler:
                 completed, _ = wait(tuple(in_flight.keys()), return_when=FIRST_COMPLETED)
                 for future in completed:
                     sender = in_flight.pop(future)
-                    results.append(future.result())
+                    yield future.result()
                     if sender_queues[sender]:
                         ready_senders.append(sender)
 
@@ -59,8 +65,6 @@ class SenderRoundRobinScheduler:
                     in_flight,
                     max_workers=max_workers,
                 )
-
-        return results
 
     @staticmethod
     def _fill_worker_pool(

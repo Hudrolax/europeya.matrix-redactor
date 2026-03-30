@@ -313,7 +313,7 @@ def _execute_locked_run(
 
                     eligible_candidates_by_sender.setdefault(candidate.sender, []).append(candidate)
 
-            for result in round_robin_scheduler.run(
+            for result in round_robin_scheduler.iter_results(
                 eligible_candidates_by_sender,
                 lambda candidate: executor.execute_candidate(
                     candidate,
