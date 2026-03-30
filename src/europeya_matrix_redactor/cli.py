@@ -334,7 +334,7 @@ def _execute_locked_run(
         )
         print(json.dumps(completed_summary, ensure_ascii=True))
         return 0 if failure_count == 0 else 1
-    except Exception as exc:
+    except BaseException as exc:
         journal.finish_run(
             run_id,
             RunStatus.FAILED,
