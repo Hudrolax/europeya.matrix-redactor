@@ -1,0 +1,2 @@
+TZ=Europe/Moscow
+0 5 * * * python -m europeya_matrix_redactor.cli run-once

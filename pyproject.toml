@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "europeya-matrix-redactor"
+version = "0.1.0"
+description = "Server-side Matrix message redactor for Synapse rooms."
+readme = "docs/README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "croniter>=3.0.4,<4.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "pydantic>=2.11.0,<3.0.0",
+  "pydantic-settings>=2.8.0,<3.0.0",
+  "sqlalchemy>=2.0.39,<3.0.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+  "psycopg[binary]>=3.2.0,<4.0.0",
+]
+dev = [
+  "pytest>=8.3.0,<9.0.0",
+]
+
+[project.scripts]
+matrix-redactor = "europeya_matrix_redactor.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

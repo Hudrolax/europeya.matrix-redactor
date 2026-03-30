@@ -1,0 +1,19 @@
+services:
+  matrix-redactor:
+    build: .
+    container_name: matrix-redactor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /srv/matrix/synapse:/opt/synapse:ro
+      - ./var:/app/var
+    command:
+      - /bin/sh
+      - -lc
+      - python -m europeya_matrix_redactor.cli render-crontab --output /app/var/crontab && exec supercronic /app/var/crontab
+    healthcheck:
+      test: ["CMD", "python", "-m", "europeya_matrix_redactor.cli", "healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
