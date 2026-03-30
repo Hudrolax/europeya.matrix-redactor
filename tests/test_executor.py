@@ -8,27 +8,26 @@ from europeya_matrix_redactor.dto import CandidateEvent, SenderScopeStatus
 from europeya_matrix_redactor.services.executor import RedactionExecutor
 
 
-def test_matrix_client_can_issue_impersonation_token() -> None:
+def test_matrix_client_healthcheck_works_without_access_token() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"access_token": "child-token"})
+        return httpx.Response(200, json={"versions": ["v1.11"]})
 
     with MatrixClient(
         base_url="http://synapse.local",
-        access_token="admin-token",
+        access_token=None,
         timeout_seconds=1,
         max_retries=1,
         rate_limit_sleep_ms=0,
         transport=httpx.MockTransport(handler),
     ) as client:
-        access_token = client.login_as_user("@alice:example.com", valid_until_ms=123456)
+        health = client.healthcheck()
 
-    assert access_token == "child-token"
-    assert requests[-1].headers["Authorization"] == "Bearer admin-token"
-    assert "%40alice%3Aexample.com" in str(requests[-1].url)
-    assert requests[-1].content == b'{"valid_until_ms":123456}'
+    assert health == {"versions": ["v1.11"]}
+    assert "Authorization" not in requests[-1].headers
+    assert str(requests[-1].url).endswith("/_matrix/client/versions")
 
 
 def test_matrix_client_retries_on_rate_limit_and_redacts() -> None:
@@ -114,7 +113,8 @@ def test_redaction_executor_skips_remote_sender() -> None:
         user_id="@remote:elsewhere",
         is_local=False,
         is_active=False,
-        mode="local_user_impersonation",
+        has_access_token=False,
+        mode="local_user_access_token",
         failure_reason="remote_user_unsupported",
     )
 

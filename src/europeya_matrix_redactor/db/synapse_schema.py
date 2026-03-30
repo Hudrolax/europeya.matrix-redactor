@@ -60,3 +60,27 @@ users = Table(
     Column("admin", Boolean, nullable=False, default=False),
     Column("deactivated", Boolean, nullable=False, default=False),
 )
+
+access_tokens = Table(
+    "access_tokens",
+    synapse_metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("user_id", Text, nullable=False),
+    Column("device_id", Text),
+    Column("token", Text, nullable=False),
+    Column("valid_until_ms", BigInteger),
+    Column("puppets_user_id", Text),
+    Column("last_validated", BigInteger),
+    Column("used", Boolean, nullable=False, default=False),
+)
+
+user_ips = Table(
+    "user_ips",
+    synapse_metadata,
+    Column("user_id", Text, nullable=False),
+    Column("access_token", Text, nullable=False),
+    Column("device_id", Text),
+    Column("ip", Text),
+    Column("user_agent", Text),
+    Column("last_seen", BigInteger),
+)

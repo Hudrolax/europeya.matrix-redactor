@@ -22,12 +22,13 @@ class RedactionPlanner:
         cutoff_ms: int,
         allowlist: Sequence[str],
         sample_size: int,
+        now_ms: int,
     ) -> DryRunReport:
         total_candidates = self.event_repository.count_candidates(cutoff_ms, allowlist)
         counts_by_type = self.event_repository.count_candidates_by_type(cutoff_ms, allowlist)
         counts_by_room = self.event_repository.count_candidates_by_room(cutoff_ms, allowlist)
         counts_by_sender = self.event_repository.count_candidates_by_sender(cutoff_ms, allowlist)
-        sender_scope = self.sender_scope_verifier.verify_senders(counts_by_sender.keys())
+        sender_scope = self.sender_scope_verifier.verify_senders(counts_by_sender.keys(), now_ms)
         sample_candidates = self.event_repository.sample_candidates(cutoff_ms, allowlist, sample_size)
         return DryRunReport(
             cutoff_ms=cutoff_ms,

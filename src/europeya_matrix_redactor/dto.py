@@ -5,7 +5,7 @@ from enum import StrEnum
 
 
 class RedactionMode(StrEnum):
-    LOCAL_USER_IMPERSONATION = "local_user_impersonation"
+    LOCAL_USER_ACCESS_TOKEN = "local_user_access_token"
 
 
 class RunMode(StrEnum):
@@ -37,12 +37,18 @@ class SenderScopeStatus:
     user_id: str
     is_local: bool
     is_active: bool
+    has_access_token: bool
     mode: str
     failure_reason: str | None = None
 
     @property
     def can_redact(self) -> bool:
-        return self.is_local and self.is_active and self.failure_reason is None
+        return (
+            self.is_local
+            and self.is_active
+            and self.has_access_token
+            and self.failure_reason is None
+        )
 
     def as_dict(self) -> dict[str, object]:
         payload = asdict(self)

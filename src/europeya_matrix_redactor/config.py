@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from croniter import croniter
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_EVENT_TYPE_ALLOWLIST = (
@@ -34,10 +34,6 @@ class AppConfig(BaseSettings):
 
     synapse_base_url: str = Field(alias="SYNAPSE_BASE_URL", min_length=1)
     synapse_db_url: str = Field(alias="SYNAPSE_DB_URL", min_length=1)
-    synapse_admin_access_token: SecretStr | None = Field(
-        default=None,
-        validation_alias=AliasChoices("SYNAPSE_ADMIN_ACCESS_TOKEN", "MATRIX_ACCESS_TOKEN"),
-    )
     ttl_hours: int = Field(default=24, alias="TTL_HOURS", gt=0)
     cron_schedule: str = Field(default="0 5 * * *", alias="CRON_SCHEDULE", min_length=1)
     timezone: str = Field(default="Europe/Moscow", alias="TZ", min_length=1)
@@ -47,11 +43,6 @@ class AppConfig(BaseSettings):
     request_timeout_seconds: float = Field(default=15.0, alias="REQUEST_TIMEOUT_SECONDS", gt=0)
     max_retries: int = Field(default=3, alias="MAX_RETRIES", ge=0)
     rate_limit_sleep_ms: int = Field(default=200, alias="RATE_LIMIT_SLEEP_MS", ge=0)
-    impersonation_token_ttl_seconds: int = Field(
-        default=900,
-        alias="IMPERSONATION_TOKEN_TTL_SECONDS",
-        gt=0,
-    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     app_state_db_url: str = Field(
         default="sqlite+pysqlite:////app/var/state.db",
@@ -102,19 +93,6 @@ class AppConfig(BaseSettings):
         if not normalized:
             raise ValueError("EVENT_TYPE_ALLOWLIST cannot be empty")
         return normalized
-
-    @model_validator(mode="after")
-    def _validate_mode_requirements(self) -> "AppConfig":
-        if self.synapse_admin_access_token is None:
-            raise ValueError("SYNAPSE_ADMIN_ACCESS_TOKEN is required")
-        return self
-
-    @property
-    def synapse_admin_access_token_value(self) -> str | None:
-        if self.synapse_admin_access_token is None:
-            return None
-        return self.synapse_admin_access_token.get_secret_value()
-
 
 def load_config(env_file: str | Path | None = None, **overrides: object) -> AppConfig:
     if env_file is None:

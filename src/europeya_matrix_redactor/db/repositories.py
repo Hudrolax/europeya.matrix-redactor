@@ -7,7 +7,13 @@ from sqlalchemy import and_, func, insert, or_, outerjoin, select, update
 from sqlalchemy.engine import Engine
 
 from europeya_matrix_redactor.db.app_state_schema import run_failures, runs
-from europeya_matrix_redactor.db.synapse_schema import events, redactions, users
+from europeya_matrix_redactor.db.synapse_schema import (
+    access_tokens,
+    events,
+    redactions,
+    user_ips,
+    users,
+)
 from europeya_matrix_redactor.dto import CandidateEvent, RedactionResult, RunMode, RunStatus
 
 
@@ -145,6 +151,64 @@ class SynapseEventRepository:
             str(row["name"]): {"deactivated": bool(row["deactivated"])}
             for row in rows
         }
+
+    def get_sender_tokens(self, user_ids: Iterable[str], now_ms: int) -> dict[str, list[str]]:
+        normalized_user_ids = tuple(sorted(set(user_ids)))
+        if not normalized_user_ids:
+            return {}
+
+        latest_token_activity = (
+            select(
+                user_ips.c.user_id.label("user_id"),
+                user_ips.c.access_token.label("access_token"),
+                func.max(user_ips.c.last_seen).label("last_seen"),
+            )
+            .group_by(user_ips.c.user_id, user_ips.c.access_token)
+            .subquery()
+        )
+
+        token_activity_join = outerjoin(
+            access_tokens,
+            latest_token_activity,
+            and_(
+                access_tokens.c.user_id == latest_token_activity.c.user_id,
+                access_tokens.c.token == latest_token_activity.c.access_token,
+            ),
+        )
+        query = (
+            select(
+                access_tokens.c.user_id,
+                access_tokens.c.token,
+                access_tokens.c.last_validated,
+                access_tokens.c.id,
+                latest_token_activity.c.last_seen,
+            )
+            .select_from(token_activity_join)
+            .where(access_tokens.c.user_id.in_(normalized_user_ids))
+            .where(access_tokens.c.token != "")
+            .where(access_tokens.c.puppets_user_id.is_(None))
+            .where(
+                or_(
+                    access_tokens.c.valid_until_ms.is_(None),
+                    access_tokens.c.valid_until_ms > now_ms,
+                ),
+            )
+            .order_by(
+                access_tokens.c.user_id.asc(),
+                latest_token_activity.c.last_seen.desc().nulls_last(),
+                access_tokens.c.last_validated.desc().nulls_last(),
+                access_tokens.c.id.desc(),
+            )
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(query).mappings().all()
+
+        tokens_by_user: dict[str, list[str]] = {}
+        for row in rows:
+            user_id = str(row["user_id"])
+            token = str(row["token"])
+            tokens_by_user.setdefault(user_id, []).append(token)
+        return tokens_by_user
 
     @staticmethod
     def _row_to_candidate(row) -> CandidateEvent:

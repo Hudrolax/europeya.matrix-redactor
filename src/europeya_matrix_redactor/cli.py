@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Sequence
 
 from europeya_matrix_redactor.clients.matrix_client import MatrixClient, MatrixRequestError
 from europeya_matrix_redactor.config import AppConfig, load_config
@@ -24,6 +25,50 @@ from europeya_matrix_redactor.services.room_access import SenderScopeVerifier
 from europeya_matrix_redactor.services.run_journal import RunJournalService
 
 DEFAULT_SAMPLE_SIZE = 10
+
+
+class SenderTokenClient:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        access_tokens: Sequence[str],
+        timeout_seconds: float,
+        max_retries: int,
+        rate_limit_sleep_ms: int,
+    ) -> None:
+        self._clients = [
+            MatrixClient(
+                base_url=base_url,
+                access_token=access_token,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
+                rate_limit_sleep_ms=rate_limit_sleep_ms,
+            )
+            for access_token in access_tokens
+        ]
+
+    def redact_event(self, room_id: str, event_id: str, reason: str) -> str | None:
+        last_error: MatrixRequestError | None = None
+        for client in self._clients:
+            try:
+                return client.redact_event(room_id, event_id, reason)
+            except MatrixRequestError as exc:
+                last_error = exc
+                if exc.http_status == 401 or exc.errcode == "M_UNKNOWN_TOKEN":
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise MatrixRequestError(
+            message="sender has no usable access token",
+            retryable=False,
+        )
+
+    def close(self) -> None:
+        for client in self._clients:
+            client.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -151,12 +196,14 @@ def _execute_locked_run(
     skipped_count = 0
     failure_count = 0
     processed_count = 0
+    current_time_ms = int(time.time() * 1000)
 
     try:
         report = planner.build_dry_run_report(
             cutoff_ms=cutoff_ms,
             allowlist=config.event_type_allowlist,
             sample_size=sample_size,
+            now_ms=current_time_ms,
         )
         summary = report.as_dict()
         sender_scope_map = dict(report.sender_scope)
@@ -176,90 +223,72 @@ def _execute_locked_run(
                 print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
             return 0
 
-        with MatrixClient(
-            base_url=config.synapse_base_url,
-            access_token=config.synapse_admin_access_token_value,
-            timeout_seconds=config.request_timeout_seconds,
-            max_retries=config.max_retries,
-            rate_limit_sleep_ms=config.rate_limit_sleep_ms,
-        ) as admin_client:
-            impersonated_clients: dict[str, MatrixClient] = {}
-            impersonation_failures: dict[str, MatrixRequestError] = {}
+        sender_tokens = planner.event_repository.get_sender_tokens(
+            (
+                sender_id
+                for sender_id, status in sender_scope_map.items()
+                if status.can_redact
+            ),
+            current_time_ms,
+        )
+        sender_clients: dict[str, SenderTokenClient] = {}
 
-            def get_client_for_sender(sender: str) -> MatrixClient:
-                cached_client = impersonated_clients.get(sender)
-                if cached_client is not None:
-                    return cached_client
+        def get_client_for_sender(sender: str) -> SenderTokenClient:
+            cached_client = sender_clients.get(sender)
+            if cached_client is not None:
+                return cached_client
 
-                cached_error = impersonation_failures.get(sender)
-                if cached_error is not None:
-                    raise cached_error
-
-                valid_until_ms = int(time.time() * 1000) + (
-                    config.impersonation_token_ttl_seconds * 1000
+            access_tokens = sender_tokens.get(sender, [])
+            if not access_tokens:
+                raise MatrixRequestError(
+                    message=f"no valid access token for {sender}",
+                    retryable=False,
                 )
-                try:
-                    access_token = admin_client.login_as_user(
-                        sender,
-                        valid_until_ms=valid_until_ms,
-                    )
-                except MatrixRequestError as exc:
-                    wrapped = MatrixRequestError(
-                        message=f"impersonation failed for {sender}: {exc}",
-                        retryable=exc.retryable,
-                        http_status=exc.http_status,
-                        errcode=exc.errcode,
-                    )
-                    impersonation_failures[sender] = wrapped
-                    raise wrapped from exc
 
-                client = MatrixClient(
-                    base_url=config.synapse_base_url,
-                    access_token=access_token,
-                    timeout_seconds=config.request_timeout_seconds,
-                    max_retries=config.max_retries,
-                    rate_limit_sleep_ms=config.rate_limit_sleep_ms,
-                )
-                impersonated_clients[sender] = client
-                return client
-
-            executor = RedactionExecutor(
-                client_provider=get_client_for_sender,
-                redaction_reason=config.redaction_reason,
+            client = SenderTokenClient(
+                base_url=config.synapse_base_url,
+                access_tokens=access_tokens,
+                timeout_seconds=config.request_timeout_seconds,
+                max_retries=config.max_retries,
                 rate_limit_sleep_ms=config.rate_limit_sleep_ms,
             )
-            try:
-                for batch in planner.iter_candidate_batches(
-                    cutoff_ms=cutoff_ms,
-                    allowlist=config.event_type_allowlist,
-                    batch_size=config.batch_size,
-                ):
-                    processed_count += len(batch)
-                    for result in executor.execute_batch(batch, sender_scope_map):
-                        if result.success:
-                            success_count += 1
-                            continue
+            sender_clients[sender] = client
+            return client
 
-                        sender_status = sender_scope_map.get(result.sender)
-                        if sender_status is not None and not sender_status.can_redact:
-                            skipped_count += 1
-                            journal.record_failure(
-                                run_id,
-                                failure_kind="sender_scope",
-                                room_id=result.room_id,
-                                event_id=result.event_id,
-                                error_message=sender_status.failure_reason or "sender scope denied",
-                            )
-                            continue
+        executor = RedactionExecutor(
+            client_provider=get_client_for_sender,
+            redaction_reason=config.redaction_reason,
+            rate_limit_sleep_ms=config.rate_limit_sleep_ms,
+        )
+        try:
+            for batch in planner.iter_candidate_batches(
+                cutoff_ms=cutoff_ms,
+                allowlist=config.event_type_allowlist,
+                batch_size=config.batch_size,
+            ):
+                processed_count += len(batch)
+                for result in executor.execute_batch(batch, sender_scope_map):
+                    if result.success:
+                        success_count += 1
+                        continue
 
-                        failure_count += 1
-                        journal.record_redaction_result(run_id, result)
-            finally:
-                failure_count += _logout_impersonated_clients(
-                    impersonated_clients,
-                    journal,
-                    run_id,
-                )
+                    sender_status = sender_scope_map.get(result.sender)
+                    if sender_status is not None and not sender_status.can_redact:
+                        skipped_count += 1
+                        journal.record_failure(
+                            run_id,
+                            failure_kind="sender_scope",
+                            room_id=result.room_id,
+                            event_id=result.event_id,
+                            error_message=sender_status.failure_reason or "sender scope denied",
+                        )
+                        continue
+
+                    failure_count += 1
+                    journal.record_redaction_result(run_id, result)
+        finally:
+            for client in sender_clients.values():
+                client.close()
 
         completed_summary = {
             **summary,
@@ -307,30 +336,6 @@ def _execute_locked_run(
         logger.exception("run failed", extra={"run_id": run_id})
         raise
 
-
-def _logout_impersonated_clients(
-    impersonated_clients: dict[str, MatrixClient],
-    journal: RunJournalService,
-    run_id: int,
-) -> int:
-    failures = 0
-    for sender, client in impersonated_clients.items():
-        try:
-            client.logout()
-        except MatrixRequestError as exc:
-            failures += 1
-            journal.record_failure(
-                run_id,
-                failure_kind="impersonation_logout",
-                error_message=f"logout failed for {sender}: {exc}",
-                retryable=exc.retryable,
-                http_status=exc.http_status,
-            )
-        finally:
-            client.close()
-    return failures
-
-
 def run_healthcheck(config: AppConfig) -> int:
     synapse_engine = build_synapse_engine(config.synapse_db_url)
     app_state_engine = build_app_state_engine(config.app_state_db_url)
@@ -341,7 +346,7 @@ def run_healthcheck(config: AppConfig) -> int:
         ping_database(app_state_engine)
         with MatrixClient(
             base_url=config.synapse_base_url,
-            access_token=config.synapse_admin_access_token_value,
+            access_token=None,
             timeout_seconds=config.request_timeout_seconds,
             max_retries=config.max_retries,
             rate_limit_sleep_ms=config.rate_limit_sleep_ms,

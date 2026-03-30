@@ -62,20 +62,6 @@ class MatrixClient:
             result["whoami"] = whoami.get("user_id")
         return result
 
-    def login_as_user(self, user_id: str, *, valid_until_ms: int | None = None) -> str:
-        path = f"/_synapse/admin/v1/users/{quote(user_id, safe='')}/login"
-        payload: dict[str, object] = {}
-        if valid_until_ms is not None:
-            payload["valid_until_ms"] = valid_until_ms
-        response = self._request_json("POST", path, json=payload)
-        access_token = response.get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            raise MatrixRequestError(
-                message="Synapse admin login did not return access_token",
-                retryable=False,
-            )
-        return access_token
-
     def redact_event(self, room_id: str, event_id: str, reason: str) -> str | None:
         txn_id = uuid.uuid4().hex
         path = (
@@ -84,9 +70,6 @@ class MatrixClient:
         )
         payload = self._request_json("PUT", path, json={"reason": reason})
         return payload.get("event_id")
-
-    def logout(self) -> None:
-        self._request_json("POST", "/_matrix/client/v3/logout", json={})
 
     def _request_json(
         self,
