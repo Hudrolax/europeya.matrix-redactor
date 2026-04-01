@@ -5,7 +5,7 @@ from pathlib import Path
 
 from croniter import croniter
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 DEFAULT_EVENT_TYPE_ALLOWLIST = (
     "m.room.encrypted",
@@ -56,6 +56,19 @@ class AppConfig(BaseSettings):
         alias="EVENT_TYPE_ALLOWLIST",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Mounted .env must win over container env so docker compose restart
+        # picks up fresh file contents without recreating the container.
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
+
     @field_validator("synapse_base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
@@ -94,6 +107,7 @@ class AppConfig(BaseSettings):
         if not normalized:
             raise ValueError("EVENT_TYPE_ALLOWLIST cannot be empty")
         return normalized
+
 
 def load_config(env_file: str | Path | None = None, **overrides: object) -> AppConfig:
     if env_file is None:

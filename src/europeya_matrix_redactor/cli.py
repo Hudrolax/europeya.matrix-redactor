@@ -92,6 +92,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     render_crontab = subparsers.add_parser("render-crontab", help="Render supercronic crontab file")
     render_crontab.add_argument("--output", required=True, help="Destination path for the crontab")
+    render_crontab.add_argument(
+        "--command",
+        dest="scheduler_command",
+        default=None,
+        help="Command to execute from crontab; defaults to the built-in run-once command",
+    )
 
     return parser
 
@@ -101,11 +107,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = load_config(args.env_file)
     configure_logging(config.log_level)
+    logger = get_logger(__name__)
+    logger.info(
+        "runtime config loaded",
+        extra={
+            "command": args.command,
+            "ttl_hours": config.ttl_hours,
+            "cron_schedule": config.cron_schedule,
+            "timezone": config.timezone,
+            "dry_run": config.dry_run,
+        },
+    )
 
     if args.command == "healthcheck":
         return run_healthcheck(config)
     if args.command == "render-crontab":
-        return run_render_crontab(config, output_path=args.output)
+        return run_render_crontab(
+            config,
+            output_path=args.output,
+            command=args.scheduler_command,
+        )
     if args.command == "dry-run-report":
         return run_once(config, dry_run_override=True, sample_size=args.sample_size, print_report=True)
     if args.command == "run-once":
@@ -403,8 +424,21 @@ def run_healthcheck(config: AppConfig) -> int:
         app_state_engine.dispose()
 
 
-def run_render_crontab(config: AppConfig, *, output_path: str) -> int:
-    path = write_crontab(output_path, config.cron_schedule, timezone=config.timezone)
+def run_render_crontab(
+    config: AppConfig,
+    *,
+    output_path: str,
+    command: str | None = None,
+) -> int:
+    if command is None:
+        path = write_crontab(output_path, config.cron_schedule, timezone=config.timezone)
+    else:
+        path = write_crontab(
+            output_path,
+            config.cron_schedule,
+            timezone=config.timezone,
+            command=command,
+        )
     print(json.dumps({"status": "ok", "crontab_path": str(path)}, ensure_ascii=True))
     return 0
 

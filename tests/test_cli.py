@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from europeya_matrix_redactor.cli import _execute_locked_run
+from europeya_matrix_redactor.cli import _execute_locked_run, main
 from europeya_matrix_redactor.config import AppConfig
 from europeya_matrix_redactor.dto import DryRunReport, RunMode, RunStatus
 
@@ -124,3 +124,38 @@ def test_execute_locked_run_marks_keyboard_interrupt_as_failed(tmp_path: Path) -
             "error_message": "stop requested",
         }
     ]
+
+
+def test_main_logs_runtime_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_file = tmp_path / "runtime.env"
+    output_file = tmp_path / "crontab"
+    env_file.write_text(
+        "\n".join(
+            [
+                "SYNAPSE_BASE_URL=http://synapse.local",
+                "SYNAPSE_DB_URL=sqlite+pysqlite:////tmp/synapse.db",
+                "TTL_HOURS=12",
+                "CRON_SCHEDULE=0 5 * * *",
+                "TZ=Europe/Moscow",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--env-file",
+            str(env_file),
+            "render-crontab",
+            "--output",
+            str(output_file),
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert '"message": "runtime config loaded"' in captured.err
+    assert '"ttl_hours": 12' in captured.err
+    assert '"cron_schedule": "0 5 * * *"' in captured.err

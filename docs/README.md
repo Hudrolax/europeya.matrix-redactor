@@ -61,6 +61,10 @@
 - [docs/implementation-plan.md](/Users/hudro/code/europeya.matrix-redactor/docs/implementation-plan.md) — текущая структура кода и модулей.
 - [docs/decision-log.md](/Users/hudro/code/europeya.matrix-redactor/docs/decision-log.md) — принятые архитектурные решения.
 
+## Локальная админ-документация
+
+- [~/AGENTS.md](/Users/hudro/AGENTS.md) — локальные правила доступа к серверам и сопутствующая эксплуатационная документация.
+
 ## Источники
 
 - [Matrix Client-Server API: redact](https://spec.matrix.org/latest/client-server-api/index.html#put_matrixclientv3roomsroomidredacteventidtxnid)

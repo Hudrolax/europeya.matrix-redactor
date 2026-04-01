@@ -32,3 +32,30 @@ def test_config_rejects_invalid_cron_schedule(tmp_path: Path) -> None:
             cron_schedule="not a cron",
             lock_file_path=tmp_path / "run.lock",
         )
+
+
+def test_explicit_env_file_overrides_process_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "SYNAPSE_BASE_URL=http://synapse.from.file",
+                "SYNAPSE_DB_URL=sqlite+pysqlite:////tmp/from-file.db",
+                "TTL_HOURS=12",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SYNAPSE_BASE_URL", "http://synapse.from.env")
+    monkeypatch.setenv("SYNAPSE_DB_URL", "sqlite+pysqlite:////tmp/from-env.db")
+    monkeypatch.setenv("TTL_HOURS", "24")
+
+    config = load_config(env_file)
+
+    assert config.synapse_base_url == "http://synapse.from.file"
+    assert config.synapse_db_url == "sqlite+pysqlite:////tmp/from-file.db"
+    assert config.ttl_hours == 12
