@@ -28,7 +28,7 @@ COPY src /app/src
 COPY .env.example /app/.env.example
 COPY crontab /app/crontab
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[postgres]'
 
 RUN mkdir -p /app/var
 
