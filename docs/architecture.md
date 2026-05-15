@@ -129,6 +129,7 @@ sequenceDiagram
 - `rejection_reason IS NULL`
 - `state_key IS NULL`
 - `type IN EVENT_TYPE_ALLOWLIST`
+- `room_id NOT IN ROOM_ID_EXCLUDELIST`, если список исключённых комнат задан
 - нет записи в `redactions`, где `redactions.redacts = events.event_id`
 
 Allowlist по умолчанию:

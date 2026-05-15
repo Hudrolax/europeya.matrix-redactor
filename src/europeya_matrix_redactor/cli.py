@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             "cron_schedule": config.cron_schedule,
             "timezone": config.timezone,
             "dry_run": config.dry_run,
+            "excluded_room_count": len(config.room_id_excludelist),
         },
     )
 
@@ -226,6 +227,7 @@ def _execute_locked_run(
         report = planner.build_dry_run_report(
             cutoff_ms=cutoff_ms,
             allowlist=config.event_type_allowlist,
+            excluded_room_ids=config.room_id_excludelist,
             sample_size=sample_size,
             now_ms=current_time_ms,
         )
@@ -295,6 +297,7 @@ def _execute_locked_run(
             for batch in planner.iter_candidate_batches(
                 cutoff_ms=cutoff_ms,
                 allowlist=config.event_type_allowlist,
+                excluded_room_ids=config.room_id_excludelist,
                 batch_size=config.batch_size,
             ):
                 processed_count += len(batch)

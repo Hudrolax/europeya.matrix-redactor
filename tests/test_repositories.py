@@ -237,6 +237,20 @@ def test_candidate_repository_filters_redacted_state_and_recent_events(
             "@alice:example.com": 1,
             "@bob:example.com": 1,
         }
+        assert repository.count_candidates(1_000, allowlist, ("!room-b:example.com",)) == 1
+        assert repository.count_candidates_by_room(1_000, allowlist, ("!room-b:example.com",)) == {
+            "!room-a:example.com": 1,
+        }
+        assert [
+            candidate.event_id
+            for batch in repository.iter_candidates(
+                1_000,
+                allowlist,
+                batch_size=10,
+                excluded_room_ids=("!room-a:example.com",),
+            )
+            for candidate in batch
+        ] == ["$old-message"]
         assert repository.get_sender_profiles(
             ["@alice:example.com", "@bob:example.com", "@remote:elsewhere"],
         ) == {

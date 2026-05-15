@@ -14,11 +14,13 @@ def test_config_normalizes_allowlist_and_base_url(tmp_path: Path) -> None:
         synapse_base_url="http://synapse.local/",
         synapse_db_url="sqlite+pysqlite:////tmp/synapse.db",
         event_type_allowlist=" m.room.message, m.room.encrypted ,, ",
+        room_id_excludelist=" !room-a:example.com, !room-b:example.com ,, ",
         lock_file_path=tmp_path / "run.lock",
     )
 
     assert config.synapse_base_url == "http://synapse.local"
     assert config.event_type_allowlist == ("m.room.message", "m.room.encrypted")
+    assert config.room_id_excludelist == ("!room-a:example.com", "!room-b:example.com")
     assert config.max_concurrent_senders == 8
     assert config.rate_limit_sleep_ms == 0
 

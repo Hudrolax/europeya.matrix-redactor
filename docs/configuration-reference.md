@@ -212,6 +212,20 @@ EVENT_TYPE_ALLOWLIST=m.room.encrypted,m.room.message,m.reaction
 
 - определяет набор event type, которые считаются пользовательскими сообщениями для redaction.
 
+### `ROOM_ID_EXCLUDELIST`
+
+Пример:
+
+```env
+ROOM_ID_EXCLUDELIST=!room-a:example.com,!room-b:example.com
+```
+
+Назначение:
+
+- задаёт comma-separated список `room_id`, в которых сообщения не должны удаляться;
+- применяется на этапе SQL-отбора кандидатов, поэтому исключённые комнаты не попадают ни в dry-run counts, ни в real-run redaction;
+- пустое значение означает, что исключённых комнат нет.
+
 ## 8. Дополнительная переменная compose
 
 ### `SYNAPSE_DATA_DIR`

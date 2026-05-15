@@ -61,6 +61,7 @@ class _InterruptingPlanner:
         self,
         cutoff_ms: int,
         allowlist: tuple[str, ...],
+        excluded_room_ids: tuple[str, ...],
         sample_size: int,
         now_ms: int,
     ) -> DryRunReport:
@@ -74,7 +75,13 @@ class _InterruptingPlanner:
             sample_candidates=[],
         )
 
-    def iter_candidate_batches(self, cutoff_ms: int, allowlist: tuple[str, ...], batch_size: int):
+    def iter_candidate_batches(
+        self,
+        cutoff_ms: int,
+        allowlist: tuple[str, ...],
+        excluded_room_ids: tuple[str, ...],
+        batch_size: int,
+    ):
         raise KeyboardInterrupt("stop requested")
         yield  # pragma: no cover
 

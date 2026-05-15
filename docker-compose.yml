@@ -20,6 +20,7 @@ services:
       APP_STATE_DB_URL: "${APP_STATE_DB_URL:-sqlite+pysqlite:////app/var/state.db}"
       LOCK_FILE_PATH: "${LOCK_FILE_PATH:-/app/var/run.lock}"
       EVENT_TYPE_ALLOWLIST: "${EVENT_TYPE_ALLOWLIST:-m.room.encrypted,m.room.message,m.reaction}"
+      ROOM_ID_EXCLUDELIST: "${ROOM_ID_EXCLUDELIST:-}"
     volumes:
       - ./.env:/app/.env:ro
       - ${SYNAPSE_DATA_DIR:-./synapse-data}:/opt/synapse:ro

@@ -21,15 +21,21 @@ class RedactionPlanner:
         self,
         cutoff_ms: int,
         allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str],
         sample_size: int,
         now_ms: int,
     ) -> DryRunReport:
-        total_candidates = self.event_repository.count_candidates(cutoff_ms, allowlist)
-        counts_by_type = self.event_repository.count_candidates_by_type(cutoff_ms, allowlist)
-        counts_by_room = self.event_repository.count_candidates_by_room(cutoff_ms, allowlist)
-        counts_by_sender = self.event_repository.count_candidates_by_sender(cutoff_ms, allowlist)
+        total_candidates = self.event_repository.count_candidates(cutoff_ms, allowlist, excluded_room_ids)
+        counts_by_type = self.event_repository.count_candidates_by_type(cutoff_ms, allowlist, excluded_room_ids)
+        counts_by_room = self.event_repository.count_candidates_by_room(cutoff_ms, allowlist, excluded_room_ids)
+        counts_by_sender = self.event_repository.count_candidates_by_sender(cutoff_ms, allowlist, excluded_room_ids)
         sender_scope = self.sender_scope_verifier.verify_senders(counts_by_sender.keys(), now_ms)
-        sample_candidates = self.event_repository.sample_candidates(cutoff_ms, allowlist, sample_size)
+        sample_candidates = self.event_repository.sample_candidates(
+            cutoff_ms,
+            allowlist,
+            sample_size,
+            excluded_room_ids,
+        )
         return DryRunReport(
             cutoff_ms=cutoff_ms,
             total_candidates=total_candidates,
@@ -44,6 +50,7 @@ class RedactionPlanner:
         self,
         cutoff_ms: int,
         allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str],
         batch_size: int,
     ) -> Iterator[list[CandidateEvent]]:
-        yield from self.event_repository.iter_candidates(cutoff_ms, allowlist, batch_size)
+        yield from self.event_repository.iter_candidates(cutoff_ms, allowlist, batch_size, excluded_room_ids)

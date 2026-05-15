@@ -99,10 +99,13 @@ WHERE e.origin_server_ts < :cutoff_ms
   AND e.rejection_reason IS NULL
   AND e.state_key IS NULL
   AND e.type IN (:allowlist)
+  AND e.room_id NOT IN (:excluded_room_ids)
   AND r.redacts IS NULL
 ORDER BY e.origin_server_ts ASC
 LIMIT :batch_size;
 ```
+
+Условие по `excluded_room_ids` добавляется только когда `ROOM_ID_EXCLUDELIST` не пуст.
 
 ## 5. Запрос sender scope
 
@@ -152,7 +155,17 @@ Allowlist по умолчанию:
 - делает поведение конфигурируемым;
 - упрощает dry-run интерпретацию.
 
-## 8. Индексы и практические ожидания
+## 8. Why room excludelist
+
+`ROOM_ID_EXCLUDELIST` позволяет исключить комнаты из lifecycle policy целиком.
+
+Так как фильтр применяется в базовом запросе кандидатов:
+
+- исключённые комнаты не отображаются в dry-run summary;
+- события из исключённых комнат не проходят sender scope и membership preflight;
+- для них не отправляются Matrix redaction HTTP-запросы.
+
+## 9. Индексы и практические ожидания
 
 Для нормальной работы желательно, чтобы база имела индексы как минимум на:
 
@@ -161,7 +174,7 @@ Allowlist по умолчанию:
 
 Membership-проверка также выигрывает от индексов текущего state и membership таблиц, но проект не зависит от конкретных имен индексов.
 
-## 9. SQLite-особенности
+## 10. SQLite-особенности
 
 Для SQLite желательно монтировать каталог БД целиком, а не только один файл, потому что возможны sidecar-файлы:
 
@@ -172,7 +185,7 @@ Membership-проверка также выигрывает от индексо�
 
 - `sqlite+pysqlite:////opt/synapse/homeserver.db`
 
-## 10. Контракт репозитория
+## 11. Контракт репозитория
 
 `SynapseEventRepository` должен уметь:
 
@@ -186,7 +199,7 @@ Membership-проверка также выигрывает от индексо�
 - `get_sender_tokens(...)`
 - `get_joined_room_memberships(...)`
 
-## 11. Что нельзя делать в SQLAlchemy-слое
+## 12. Что нельзя делать в SQLAlchemy-слое
 
 - не писать в таблицы `Synapse`;
 - не удалять события через SQL;

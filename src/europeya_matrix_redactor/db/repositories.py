@@ -19,9 +19,13 @@ from europeya_matrix_redactor.db.synapse_schema import (
 from europeya_matrix_redactor.dto import CandidateEvent, RedactionResult, RunMode, RunStatus
 
 
-def _base_candidate_query(cutoff_ms: int, allowlist: Sequence[str]):
+def _base_candidate_query(
+    cutoff_ms: int,
+    allowlist: Sequence[str],
+    excluded_room_ids: Sequence[str] = (),
+):
     candidate_join = outerjoin(events, redactions, redactions.c.redacts == events.c.event_id)
-    return (
+    query = (
         select(
             events.c.event_id,
             events.c.room_id,
@@ -37,20 +41,35 @@ def _base_candidate_query(cutoff_ms: int, allowlist: Sequence[str]):
         .where(events.c.type.in_(tuple(allowlist)))
         .where(redactions.c.redacts.is_(None))
     )
+    if excluded_room_ids:
+        query = query.where(events.c.room_id.not_in(tuple(excluded_room_ids)))
+    return query
 
 
 class SynapseEventRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def count_candidates(self, cutoff_ms: int, allowlist: Sequence[str]) -> int:
-        query = select(func.count()).select_from(_base_candidate_query(cutoff_ms, allowlist).subquery())
+    def count_candidates(
+        self,
+        cutoff_ms: int,
+        allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str] = (),
+    ) -> int:
+        query = select(func.count()).select_from(
+            _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids).subquery(),
+        )
         with self.engine.connect() as connection:
             return int(connection.execute(query).scalar_one())
 
-    def count_candidates_by_type(self, cutoff_ms: int, allowlist: Sequence[str]) -> dict[str, int]:
+    def count_candidates_by_type(
+        self,
+        cutoff_ms: int,
+        allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str] = (),
+    ) -> dict[str, int]:
         query = (
-            _base_candidate_query(cutoff_ms, allowlist)
+            _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids)
             .with_only_columns(
                 events.c.type.label("event_type"),
                 func.count().label("count"),
@@ -62,9 +81,14 @@ class SynapseEventRepository:
             rows = connection.execute(query).mappings().all()
         return {str(row["event_type"]): int(row["count"]) for row in rows}
 
-    def count_candidates_by_room(self, cutoff_ms: int, allowlist: Sequence[str]) -> dict[str, int]:
+    def count_candidates_by_room(
+        self,
+        cutoff_ms: int,
+        allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str] = (),
+    ) -> dict[str, int]:
         query = (
-            _base_candidate_query(cutoff_ms, allowlist)
+            _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids)
             .with_only_columns(
                 events.c.room_id,
                 func.count().label("count"),
@@ -76,9 +100,14 @@ class SynapseEventRepository:
             rows = connection.execute(query).mappings().all()
         return {str(row["room_id"]): int(row["count"]) for row in rows}
 
-    def count_candidates_by_sender(self, cutoff_ms: int, allowlist: Sequence[str]) -> dict[str, int]:
+    def count_candidates_by_sender(
+        self,
+        cutoff_ms: int,
+        allowlist: Sequence[str],
+        excluded_room_ids: Sequence[str] = (),
+    ) -> dict[str, int]:
         query = (
-            _base_candidate_query(cutoff_ms, allowlist)
+            _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids)
             .with_only_columns(
                 events.c.sender,
                 func.count().label("count"),
@@ -95,11 +124,12 @@ class SynapseEventRepository:
         cutoff_ms: int,
         allowlist: Sequence[str],
         limit: int,
+        excluded_room_ids: Sequence[str] = (),
     ) -> list[CandidateEvent]:
         if limit <= 0:
             return []
         query = (
-            _base_candidate_query(cutoff_ms, allowlist)
+            _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids)
             .order_by(events.c.origin_server_ts.asc(), events.c.event_id.asc())
             .limit(limit)
         )
@@ -112,12 +142,13 @@ class SynapseEventRepository:
         cutoff_ms: int,
         allowlist: Sequence[str],
         batch_size: int,
+        excluded_room_ids: Sequence[str] = (),
     ) -> Iterator[list[CandidateEvent]]:
         last_timestamp: int | None = None
         last_event_id: str | None = None
         with self.engine.connect() as connection:
             while True:
-                query = _base_candidate_query(cutoff_ms, allowlist)
+                query = _base_candidate_query(cutoff_ms, allowlist, excluded_room_ids)
                 if last_timestamp is not None and last_event_id is not None:
                     query = query.where(
                         or_(

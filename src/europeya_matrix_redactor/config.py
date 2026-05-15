@@ -55,6 +55,7 @@ class AppConfig(BaseSettings):
         default=DEFAULT_EVENT_TYPE_ALLOWLIST,
         alias="EVENT_TYPE_ALLOWLIST",
     )
+    room_id_excludelist: tuple[str, ...] = Field(default=(), alias="ROOM_ID_EXCLUDELIST")
 
     @classmethod
     def settings_customise_sources(
@@ -107,6 +108,20 @@ class AppConfig(BaseSettings):
         if not normalized:
             raise ValueError("EVENT_TYPE_ALLOWLIST cannot be empty")
         return normalized
+
+    @field_validator("room_id_excludelist", mode="before")
+    @classmethod
+    def _normalize_room_id_excludelist(cls, value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",")]
+        elif isinstance(value, (tuple, list, set)):
+            items = [str(item).strip() for item in value]
+        else:
+            raise TypeError("ROOM_ID_EXCLUDELIST must be a comma-separated string or sequence")
+
+        return tuple(item for item in items if item)
 
 
 def load_config(env_file: str | Path | None = None, **overrides: object) -> AppConfig:
